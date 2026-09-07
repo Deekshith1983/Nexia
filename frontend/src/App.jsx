@@ -1,14 +1,15 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { 
-  Sparkles, 
-  BookOpen, 
-  Send, 
-  Plus, 
-  MessageSquare, 
-  ShieldCheck, 
-  ExternalLink,
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import {
+  Sparkles,
+  BookOpen,
+  Send,
+  Square,
+  Plus,
+  MessageSquare,
+  ShieldCheck,
   Cpu,
-  RefreshCw
 } from 'lucide-react';
 import './App.css';
 
@@ -18,48 +19,123 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [backendStatus, setBackendStatus] = useState(null);
   const chatEndRef = useRef(null);
+  const abortControllerRef = useRef(null);
 
-  useEffect(() => {
-    // Check backend health status
+  const fetchHealthStatus = () => {
     fetch('http://127.0.0.1:8000/api/health')
       .then((res) => res.json())
       .then((data) => setBackendStatus(data))
-      .catch(() => setBackendStatus({ status: 'offline' }));
+      .catch(() => setBackendStatus({ status: 'offline', ollama_reachable: false }));
+  };
+
+  useEffect(() => {
+    fetchHealthStatus();
+    const interval = setInterval(fetchHealthStatus, 10000);
+    return () => clearInterval(interval);
   }, []);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
+  // ──────────────────────────────────────────────
+  // Stop Generation — abort active fetch request
+  // ──────────────────────────────────────────────
+  const handleStop = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+  };
+
+  // ──────────────────────────────────────────────
+  // Send message + consume streamed response
+  // ──────────────────────────────────────────────
   const handleSend = async (queryText) => {
     const query = queryText || input;
     if (!query.trim() || loading) return;
 
     const userMessage = { id: Date.now(), sender: 'user', text: query };
-    setMessages((prev) => [...prev, userMessage]);
+    const nexiaMessageId = Date.now() + 1;
+    const initialNexiaMessage = {
+      id: nexiaMessageId,
+      sender: 'nexia',
+      text: '',
+      model: 'gemma3:4b',
+      stopped: false,
+      isError: false,
+    };
+
+    setMessages((prev) => [...prev, userMessage, initialNexiaMessage]);
     if (!queryText) setInput('');
     setLoading(true);
 
-    // Initial placeholder answer demonstrating grounded agent flow
-    setTimeout(() => {
-      const nexiaResponse = {
-        id: Date.now() + 1,
-        sender: 'nexia',
-        text: `Nexia V1 Grounded Agent core initialized. In Stage 5 & 6, this prompt will be sent to Qwen3 8B via Ollama and verified against retrieved Wikipedia evidence.`,
-        sources: [
-          { title: 'Wikipedia Knowledge Engine', url: 'https://en.wikipedia.org' }
-        ]
-      };
-      setMessages((prev) => [...prev, nexiaResponse]);
+    // Create a fresh AbortController for this request
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
+    try {
+      const response = await fetch('http://127.0.0.1:8000/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: query }),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}));
+        throw new Error(errData.detail || 'Failed to connect to Nexia backend server.');
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+      let accumulatedText = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const chunk = decoder.decode(value, { stream: true });
+        accumulatedText += chunk;
+
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === nexiaMessageId
+              ? { ...msg, text: accumulatedText }
+              : msg
+          )
+        );
+      }
+    } catch (err) {
+      if (err.name === 'AbortError') {
+        // User intentionally stopped — preserve partial response, no error badge
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === nexiaMessageId
+              ? { ...msg, stopped: true }
+              : msg
+          )
+        );
+      } else {
+        // Genuine network / server error
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === nexiaMessageId
+              ? { ...msg, isError: true, text: `⚠️ ${err.message}` }
+              : msg
+          )
+        );
+      }
+    } finally {
+      abortControllerRef.current = null;
       setLoading(false);
-    }, 800);
+    }
   };
 
   const samplePrompts = [
-    "Why did the Roman Empire fall?",
-    "Explain quantum mechanics like I'm 15",
-    "Who was Nikola Tesla?",
-    "What caused World War II?"
+    'What is the capital of India?',
+    'If I have 10 apples and give away 3, how many remain?',
+    'Write a Python function to reverse a string.',
+    'Explain machine learning in detail.',
   ];
 
   return (
@@ -90,11 +166,11 @@ export default function App() {
         <div className="sidebar-footer">
           <div className="status-badge">
             <div className="dot-pulse"></div>
-            <span>Wikipedia Grounded</span>
+            <span>Stage 2 — Gemma LLM</span>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginTop: '0.2rem' }}>
             <Cpu size={12} color="#94a3b8" />
-            <span>Qwen3 8B via Ollama</span>
+            <span>gemma3:4b via Ollama</span>
           </div>
         </div>
       </aside>
@@ -105,12 +181,13 @@ export default function App() {
         <header className="top-bar">
           <div className="top-title">
             <span>Nexia Agent</span>
-            <span className="model-pill">Qwen3 8B</span>
+            <span className="model-pill">Gemma 3 4B</span>
           </div>
           <div className="status-badge">
             <ShieldCheck size={14} />
             <span>
-              Backend API: {backendStatus?.status === 'online' ? 'Online' : 'Checking...'}
+              Backend: {backendStatus?.status === 'online' ? 'Online' : 'Offline'} |{' '}
+              Ollama: {backendStatus?.ollama_reachable ? 'Ready' : 'Offline'}
             </span>
           </div>
         </header>
@@ -124,13 +201,12 @@ export default function App() {
               </div>
               <h1 className="hero-title">Welcome to Nexia</h1>
               <p className="hero-subtitle">
-                An AI agent designed to converse naturally, with every factual claim strictly grounded in Wikipedia.
+                Stage 2: Powered by Gemma 3 4B inference through local Ollama service.
               </p>
-
               <div className="sample-prompts">
                 {samplePrompts.map((prompt, idx) => (
-                  <button 
-                    key={idx} 
+                  <button
+                    key={idx}
                     className="prompt-card"
                     onClick={() => handleSend(prompt)}
                   >
@@ -147,38 +223,30 @@ export default function App() {
                     {msg.sender === 'user' ? 'U' : <Sparkles size={18} />}
                   </div>
                   <div className="message-content">
-                    <p>{msg.text}</p>
-                    {msg.sources && (
-                      <div className="source-citations">
-                        <span>Sources:</span>
-                        {msg.sources.map((src, i) => (
-                          <a 
-                            key={i} 
-                            href={src.url} 
-                            target="_blank" 
-                            rel="noopener noreferrer" 
-                            className="citation-chip"
-                          >
-                            <BookOpen size={12} />
-                            {src.title}
-                            <ExternalLink size={10} />
-                          </a>
-                        ))}
-                      </div>
+                    {msg.isError ? (
+                      <p style={{ color: '#ef4444', fontWeight: 500 }}>{msg.text}</p>
+                    ) : msg.sender === 'user' ? (
+                      <p>{msg.text}</p>
+                    ) : (
+                      <>
+                        {!msg.text && loading && (
+                          <span className="thinking-cursor">▋</span>
+                        )}
+                        {msg.text && (
+                          <div className="markdown-body">
+                            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                              {msg.text}
+                            </ReactMarkdown>
+                          </div>
+                        )}
+                        {msg.stopped && (
+                          <p className="stopped-label">⏹ Generation stopped by user.</p>
+                        )}
+                      </>
                     )}
                   </div>
                 </div>
               ))}
-              {loading && (
-                <div className="chat-bubble animate-fade-in">
-                  <div className="avatar nexia">
-                    <RefreshCw size={16} className="spin-icon" />
-                  </div>
-                  <div className="message-content" style={{ color: 'var(--text-muted)' }}>
-                    Nexia is retrieving evidence from Wikipedia & reasoning...
-                  </div>
-                </div>
-              )}
               <div ref={chatEndRef} />
             </div>
           )}
@@ -190,8 +258,9 @@ export default function App() {
             <textarea
               className="chat-input"
               rows="1"
-              placeholder="Ask Nexia anything..."
+              placeholder="Ask Nexia (Gemma 3 4B)..."
               value={input}
+              disabled={loading}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && !e.shiftKey) {
@@ -202,16 +271,23 @@ export default function App() {
             />
             <div className="input-controls">
               <div className="input-hint">
-                <BookOpen size={12} color="#10b981" />
-                <span>Powered by Wikipedia knowledge</span>
+                <Cpu size={12} color="#3b82f6" />
+                <span>Gemma 3 4B Local Model</span>
               </div>
-              <button 
-                className="send-btn" 
-                disabled={!input.trim() || loading}
-                onClick={() => handleSend()}
-              >
-                <Send size={16} />
-              </button>
+              {loading ? (
+                <button className="stop-btn" onClick={handleStop} title="Stop generation">
+                  <Square size={14} />
+                  <span>Stop</span>
+                </button>
+              ) : (
+                <button
+                  className="send-btn"
+                  disabled={!input.trim()}
+                  onClick={() => handleSend()}
+                >
+                  <Send size={16} />
+                </button>
+              )}
             </div>
           </div>
         </div>

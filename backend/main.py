@@ -3,10 +3,14 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from app.config import settings
+from app.routes import chat
+from app.services.ollama_service import ollama_service
+
 app = FastAPI(
     title="Nexia API Core",
     description="Backend API for Nexia grounded conversational agent",
-    version="0.1.0",
+    version="0.2.0",
 )
 
 # Enable CORS for local development (React frontend on localhost:5173 / localhost:3000)
@@ -18,12 +22,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Include routes
+app.include_router(chat.router)
+
 
 class StatusResponse(BaseModel):
     status: str
     version: str
     llm_target: str
-    knowledge_source: str
+    ollama_reachable: bool
 
 
 @app.get("/")
@@ -32,12 +39,13 @@ def root():
 
 
 @app.get("/api/health", response_model=StatusResponse)
-def health_check():
+async def health_check():
+    ollama_online = await ollama_service.check_health()
     return StatusResponse(
         status="online",
-        version="0.1.0",
-        llm_target="Qwen3 8B (via Ollama)",
-        knowledge_source="Wikipedia REST API",
+        version="0.2.0",
+        llm_target=f"Gemma 3 4B ({settings.ollama_model})",
+        ollama_reachable=ollama_online,
     )
 
 
