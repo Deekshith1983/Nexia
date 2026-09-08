@@ -5,12 +5,12 @@ from pydantic import BaseModel
 
 from app.config import settings
 from app.routes import chat
-from app.services.ollama_service import ollama_service
+from app.core.nexia_core import nexia_core
 
 app = FastAPI(
     title="Nexia API Core",
     description="Backend API for Nexia grounded conversational agent",
-    version="0.2.0",
+    version="0.2.1",
 )
 
 # Enable CORS for local development (React frontend on localhost:5173 / localhost:3000)
@@ -40,12 +40,12 @@ def root():
 
 @app.get("/api/health", response_model=StatusResponse)
 async def health_check():
-    ollama_online = await ollama_service.check_health()
+    core_online = await nexia_core.check_health()
     return StatusResponse(
         status="online",
-        version="0.2.0",
+        version="0.2.1",
         llm_target=f"Gemma 3 4B ({settings.ollama_model})",
-        ollama_reachable=ollama_online,
+        ollama_reachable=core_online,
     )
 
 

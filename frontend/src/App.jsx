@@ -18,6 +18,7 @@ export default function App() {
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [backendStatus, setBackendStatus] = useState(null);
+  const [conversationId, setConversationId] = useState(null);
   const chatEndRef = useRef(null);
   const abortControllerRef = useRef(null);
 
@@ -77,13 +78,18 @@ export default function App() {
       const response = await fetch('http://127.0.0.1:8000/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: query }),
+        body: JSON.stringify({ message: query, conversation_id: conversationId }),
         signal: controller.signal,
       });
 
       if (!response.ok) {
         const errData = await response.json().catch(() => ({}));
         throw new Error(errData.detail || 'Failed to connect to Nexia backend server.');
+      }
+
+      const activeCid = response.headers.get('X-Conversation-Id');
+      if (activeCid && activeCid !== conversationId) {
+        setConversationId(activeCid);
       }
 
       const reader = response.body.getReader();
@@ -151,7 +157,13 @@ export default function App() {
           </div>
         </div>
 
-        <button className="new-chat-btn" onClick={() => setMessages([])}>
+        <button
+          className="new-chat-btn"
+          onClick={() => {
+            setMessages([]);
+            setConversationId(null);
+          }}
+        >
           <Plus size={16} />
           New Conversation
         </button>

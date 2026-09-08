@@ -1,15 +1,19 @@
+import json
+import asyncio
 import httpx
+from typing import AsyncGenerator
 from app.config import settings
+from app.core.llm_interface import BaseLanguageModel, LLMServiceError, LLMOfflineError
 
-class OllamaServiceError(Exception):
+class OllamaServiceError(LLMServiceError):
     """Base exception for Ollama service errors."""
     pass
 
-class OllamaOfflineError(OllamaServiceError):
+class OllamaOfflineError(LLMOfflineError, OllamaServiceError):
     """Raised when Ollama server is unreachable."""
     pass
 
-class OllamaService:
+class OllamaService(BaseLanguageModel):
     def __init__(self, base_url: str = None, model: str = None, timeout: float = None):
         self.base_url = (base_url or settings.ollama_base_url).rstrip('/')
         self.model = model or settings.ollama_model
@@ -54,10 +58,8 @@ class OllamaService:
         except Exception as e:
             raise OllamaServiceError(f"Unexpected error communicating with Ollama: {str(e)}")
 
-    async def stream_response(self, prompt: str):
+    async def stream_response(self, prompt: str) -> AsyncGenerator[str, None]:
         """Stream response chunks from Ollama model asynchronously."""
-        import json
-        import asyncio
         url = f"{self.base_url}/api/generate"
         payload = {
             "model": self.model,
