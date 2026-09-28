@@ -1,0 +1,300 @@
+"""
+ReflectionEngine — Central component for Stage 5 Self-Reflection & Answer Repair.
+
+Evaluates:
+  1. Evidence completeness
+  2. Answer validation outcomes
+  3. Gap identification (missing entities, unsupported claims, missing facts)
+  4. Decision on next corrective action (COMPLETE, NEEDS_RESEARCH_REPAIR, GENERATION_REPAIR_REQUIRED, UNRECOVERABLE)
+  5. Enforcement of repair action budgets and duplicate action prevention
+"""
+import logging
+import re
+import unicodedata
+from typing import List, Optional, Set, Tuple
+
+from app.agent.reflection.models import ReflectionResult, ReflectionStatus
+from app.agent.research.action import ResearchAction, ResearchActionType
+from app.agent.research.context import ResearchContext
+from app.agent.research.evidence import CompletionStatus
+from app.core.answer_validator import ValidationResult, ValidationStatus
+from app.core.query_understanding import IntentCategory, QueryUnderstanding
+
+logger = logging.getLogger("nexia.agent.reflection")
+
+_STOP_WORDS = {
+    "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "do", "does", "did", "will", "would", "could",
+    "should", "may", "might", "must", "shall", "can", "to", "of", "in",
+    "on", "at", "by", "for", "with", "from", "as", "this", "that", "these",
+    "those", "it", "its", "they", "them", "their", "he", "she", "his",
+    "her", "we", "us", "our", "you", "your", "i", "me", "my", "and",
+    "but", "or", "not", "also", "so", "than", "more", "most", "very",
+    "such", "about", "which", "who", "what", "when", "where", "how",
+    "compare", "difference", "differences", "between", "versus", "vs",
+}
+
+
+def _norm(text: str) -> str:
+    """Normalize text for duplicate check."""
+    if not text:
+        return ""
+    nfkd = unicodedata.normalize("NFKD", text)
+    ascii_str = "".join(c for c in nfkd if not unicodedata.combining(c))
+    return re.sub(r"\s+", " ", ascii_str).strip().lower()
+
+
+class ReflectionEngine:
+    """
+    Inspects agent state, research evidence, and validation outcomes to decide
+    whether the task is complete or requires targeted repair.
+    """
+
+    def reflect(
+        self,
+        *,
+        original_request: str,
+        resolved_request: str,
+        qu: QueryUnderstanding,
+        research_ctx: ResearchContext,
+        generated_answer: Optional[str] = None,
+        validation_result: Optional[ValidationResult] = None,
+        repair_attempt: int = 0,
+        max_repair_attempts: int = 2,
+        executed_repair_queries: Optional[Set[str]] = None,
+    ) -> ReflectionResult:
+        """
+        Reflect on current state and determine whether to complete, repair research,
+        repair generation, or terminate safely.
+        """
+        executed_queries = set(executed_repair_queries or [])
+        for action in research_ctx.completed_actions:
+            executed_queries.add(_norm(action.query))
+            if action.entity:
+                executed_queries.add(_norm(action.entity))
+
+        # ── 1. Check for Validation Success ──────────────────────────────────
+        if validation_result and validation_result.status == ValidationStatus.SUPPORTED:
+            logger.debug(
+                "[REFLECTION] Validation passed (SUPPORTED). Task complete."
+            )
+            return ReflectionResult(
+                status=ReflectionStatus.COMPLETE,
+                stop_reason="Answer successfully verified against Wikipedia evidence.",
+                metadata={"repair_attempt": repair_attempt},
+            )
+
+        # ── 2. Check for Validation Errors ───────────────────────────────────
+        if validation_result and validation_result.status == ValidationStatus.VALIDATION_ERROR:
+            logger.warning("[REFLECTION] Validator error encountered.")
+            if repair_attempt < max_repair_attempts:
+                return ReflectionResult(
+                    status=ReflectionStatus.GENERATION_REPAIR_REQUIRED,
+                    issue="Validation error occurred during answer verification.",
+                    stop_reason="Retrying generation to produce verifiable answer.",
+                    metadata={"repair_attempt": repair_attempt},
+                )
+            return ReflectionResult(
+                status=ReflectionStatus.UNRECOVERABLE,
+                issue="Validation error could not be resolved.",
+                stop_reason="Validation error and repair budget exhausted.",
+                metadata={"repair_attempt": repair_attempt},
+            )
+
+        # ── 3. Check Repair Budget Limits ────────────────────────────────────
+        if repair_attempt >= max_repair_attempts:
+            logger.info(
+                "[REFLECTION] Max repair attempts (%d) reached.", max_repair_attempts
+            )
+            return ReflectionResult(
+                status=ReflectionStatus.UNRECOVERABLE,
+                issue="Answer did not pass validation within allowed repair attempts.",
+                stop_reason="Repair budget exhausted.",
+                metadata={"repair_attempt": repair_attempt},
+            )
+
+        # ── 4. Multi-Entity Comparison Gap Detection ──────────────────────────
+        if qu.intent == IntentCategory.COMPARISON:
+            missing_entity = self._detect_missing_comparison_entity(
+                resolved_request, research_ctx
+            )
+            if missing_entity:
+                norm_missing = _norm(missing_entity)
+                if norm_missing not in executed_queries:
+                    logger.info(
+                        "[REFLECTION] Multi-entity gap detected: missing %r", missing_entity
+                    )
+                    return ReflectionResult(
+                        status=ReflectionStatus.NEEDS_RESEARCH_REPAIR,
+                        issue=f"Evidence missing for comparison entity: {missing_entity}",
+                        missing_information=f"Wikipedia evidence for {missing_entity}",
+                        target_entity=missing_entity,
+                        suggested_query=missing_entity,
+                        corrective_action={
+                            "type": ResearchActionType.WIKIPEDIA_RETRIEVE.value,
+                            "entity": missing_entity,
+                            "query": missing_entity,
+                            "objective": f"Targeted research for missing comparison subject: {missing_entity}",
+                        },
+                        metadata={
+                            "repair_attempt": repair_attempt,
+                            "strategy": "multi_entity_gap_fill",
+                        },
+                    )
+
+        # ── 4.5. Claim-Level Grounding Failure Diagnosis (Stage 8) ────────────
+        if validation_result and validation_result.unsupported_claims:
+            first_unsupported = validation_result.unsupported_claims[0]
+            claim_stmt = first_unsupported.statement
+            # Extract main capitalized terms or subject
+            claim_entities = re.findall(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b", claim_stmt)
+            target_ent = claim_entities[0] if claim_entities else None
+            
+            # Formulate targeted query from statement
+            target_query = target_ent or re.sub(r"[^\w\s]", "", claim_stmt[:60]).strip()
+            norm_target = _norm(target_query)
+            
+            if norm_target and norm_target not in executed_queries:
+                logger.info(
+                    "[REFLECTION] Claim grounding failure detected on claim: %r. Triggering targeted repair: %r",
+                    claim_stmt[:50], target_query
+                )
+                return ReflectionResult(
+                    status=ReflectionStatus.NEEDS_RESEARCH_REPAIR,
+                    issue=f"Claim failed grounding against current evidence: '{claim_stmt[:60]}'",
+                    missing_information=f"Supporting evidence for: {claim_stmt[:60]}",
+                    target_entity=target_ent,
+                    suggested_query=target_query,
+                    corrective_action={
+                        "type": ResearchActionType.WIKIPEDIA_RETRIEVE.value if target_ent else ResearchActionType.WIKIPEDIA_SEARCH.value,
+                        "entity": target_ent,
+                        "query": target_query,
+                        "objective": f"Targeted repair to ground claim: {claim_stmt[:60]}",
+                    },
+                    metadata={
+                        "repair_attempt": repair_attempt,
+                        "strategy": "claim_grounding_repair",
+                        "claim_id": first_unsupported.id,
+                    },
+                )
+
+        # ── 5. Missing Evidence / Specific Fact Gap Detection ─────────────────
+        missing_fact_query = self._detect_missing_fact_gap(
+            resolved_request, qu, research_ctx
+        )
+        if missing_fact_query:
+            norm_fact_query = _norm(missing_fact_query)
+            if norm_fact_query not in executed_queries:
+                logger.info(
+                    "[REFLECTION] Fact gap detected. Formulated targeted query: %r",
+                    missing_fact_query
+                )
+                return ReflectionResult(
+                    status=ReflectionStatus.NEEDS_RESEARCH_REPAIR,
+                    issue="Current evidence does not contain specific information requested.",
+                    missing_information=missing_fact_query,
+                    suggested_query=missing_fact_query,
+                    corrective_action={
+                        "type": ResearchActionType.WIKIPEDIA_SEARCH.value,
+                        "query": missing_fact_query,
+                        "objective": f"Targeted search for missing details: {missing_fact_query}",
+                    },
+                    metadata={
+                        "repair_attempt": repair_attempt,
+                        "strategy": "targeted_fact_retrieval",
+                    },
+                )
+
+
+        # ── 6. Generation Repair Detection (Sufficient Evidence Exists) ──────
+        total_evidence_len = sum(len(e.content) for e in research_ctx.evidence)
+        if total_evidence_len > 300 and generated_answer:
+            logger.info(
+                "[REFLECTION] Evidence is substantial (%d chars) but validation failed. Recommending generation repair.",
+                total_evidence_len
+            )
+            return ReflectionResult(
+                status=ReflectionStatus.GENERATION_REPAIR_REQUIRED,
+                issue="Generated answer diverged from available evidence or failed grounding.",
+                stop_reason="Regenerating answer strictly grounded in available evidence.",
+                metadata={"repair_attempt": repair_attempt},
+            )
+
+        # ── 7. Safe Fallback / Unrecoverable ──────────────────────────────────
+        logger.info(
+            "[REFLECTION] No further targeted research actions could be formed."
+        )
+        return ReflectionResult(
+            status=ReflectionStatus.UNRECOVERABLE,
+            issue="Evidence is insufficient and no viable repair query is available.",
+            stop_reason="No additional research targets found.",
+            metadata={"repair_attempt": repair_attempt},
+        )
+
+    # ── Diagnostic Helpers ───────────────────────────────────────────────────
+
+    def _detect_missing_comparison_entity(
+        self, resolved_request: str, context: ResearchContext
+    ) -> Optional[str]:
+        """Check if any entity in a comparison question is missing from retrieved evidence."""
+        # Extract entities from patterns like "compare X and Y"
+        m = re.search(
+            r"(?i)compare\s+(.+?)\s+(?:and|with|to)\s+(.+?)(?:\s*\?|\s*$)",
+            resolved_request,
+        )
+        if not m:
+            m = re.search(
+                r"(?i)differences?\s+between\s+(.+?)\s+and\s+(.+?)(?:\s*\?|\s*$)",
+                resolved_request,
+            )
+        if not m:
+            m = re.search(
+                r"(?i)(.+?)\s+(?:vs\.?|versus)\s+(.+?)(?:\s*\?|\s*$)",
+                resolved_request,
+            )
+
+        if m:
+            entities = [m.group(1).strip(), m.group(2).strip()]
+            existing_page_titles = [_norm(e.page_title) for e in context.evidence]
+            existing_content = " ".join(e.content.lower() for e in context.evidence)
+
+            for entity in entities:
+                norm_ent = _norm(entity)
+                # Check if entity is represented in page titles or prominently in evidence
+                found = any(norm_ent in title or title in norm_ent for title in existing_page_titles)
+                if not found and norm_ent not in existing_content:
+                    return entity
+
+        return None
+
+    def _detect_missing_fact_gap(
+        self,
+        resolved_request: str,
+        qu: QueryUnderstanding,
+        context: ResearchContext,
+    ) -> Optional[str]:
+        """
+        Extract specific target concepts from the query that are absent from evidence.
+        """
+        evidence_text = " ".join(e.content.lower() for e in context.evidence)
+        query_words = [
+            w for w in re.findall(r"\b[a-z]{3,}\b", resolved_request.lower())
+            if w not in _STOP_WORDS
+        ]
+
+        # Key topic words in query not found in current evidence
+        missing_keywords = [w for w in query_words if w not in evidence_text]
+        if missing_keywords and qu.entity:
+            # Construct a targeted query combining the main entity and missing keyword
+            kw_str = " ".join(missing_keywords[:2])
+            return f"{qu.entity} {kw_str}"
+
+        # If no evidence at all, use the entity or resolved request
+        if not context.evidence:
+            return qu.entity or resolved_request
+
+        return None
+
+
+# Global singleton
+reflection_engine = ReflectionEngine()

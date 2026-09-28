@@ -1,0 +1,199 @@
+import re
+import logging
+from typing import Any, Dict, List, Optional, Set
+from pydantic import BaseModel, Field
+from app.core.llm_interface import BaseLanguageModel
+from app.services.wikipedia_retriever import RetrievalResult, RetrievalStatus
+from app.knowledge.models import Claim, GroundingStatus
+
+logger = logging.getLogger("nexia.validator")
+
+
+class ValidationStatus:
+    SUPPORTED = "SUPPORTED"
+    UNSUPPORTED = "UNSUPPORTED"
+    INSUFFICIENT_EVIDENCE = "INSUFFICIENT_EVIDENCE"
+    PARTIALLY_SUPPORTED = "PARTIALLY_SUPPORTED"
+    CONFLICTING_EVIDENCE = "CONFLICTING_EVIDENCE"
+    VALIDATION_ERROR = "VALIDATION_ERROR"
+
+
+class ValidationResult(BaseModel):
+    """Structured representation of answer validation against evidence with claim-level provenance."""
+    status: str  # ValidationStatus
+    reason: Optional[str] = None
+    grounding_status: Optional[str] = None
+    claims: List[Claim] = Field(default_factory=list)
+    unsupported_claims: List[Claim] = Field(default_factory=list)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+# ── Stop-words filtered out before overlap scoring ───────────────────────────
+_STOP_WORDS = {
+    "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "do", "does", "did", "will", "would", "could",
+    "should", "may", "might", "must", "shall", "can", "to", "of", "in",
+    "on", "at", "by", "for", "with", "from", "as", "this", "that", "these",
+    "those", "it", "its", "they", "them", "their", "he", "she", "his",
+    "her", "we", "us", "our", "you", "your", "i", "me", "my", "and",
+    "but", "or", "not", "also", "so", "than", "more", "most", "very",
+    "such", "about", "which", "who", "what", "when", "where", "how",
+}
+
+
+def _significant_words(text: str) -> Set[str]:
+    """Extract significant (non-stop-word) lowercase alphabetic tokens."""
+    tokens = re.findall(r"\b[a-z]{3,}\b", text.lower())
+    return {t for t in tokens if t not in _STOP_WORDS}
+
+
+def _heuristic_validate(answer: str, evidence_content: str) -> ValidationResult:
+    """
+    Fast deterministic validation using significant-word overlap.
+    """
+    answer_words = _significant_words(answer)
+    evidence_words = _significant_words(evidence_content)
+
+    if not answer_words:
+        return ValidationResult(
+            status=ValidationStatus.INSUFFICIENT_EVIDENCE,
+            reason="Answer contains no significant content words.",
+            metadata={"method": "heuristic"},
+        )
+
+    if not evidence_words:
+        return ValidationResult(
+            status=ValidationStatus.INSUFFICIENT_EVIDENCE,
+            reason="Evidence contains no significant content words.",
+            metadata={"method": "heuristic"},
+        )
+
+    overlap_words = answer_words & evidence_words
+    overlap_ratio = len(overlap_words) / len(answer_words)
+
+    logger.debug(
+        "[VALIDATOR] answer_words=%d  evidence_words=%d  overlap=%d  ratio=%.2f",
+        len(answer_words), len(evidence_words), len(overlap_words), overlap_ratio,
+    )
+
+    if overlap_ratio >= 0.20:
+        return ValidationResult(
+            status=ValidationStatus.SUPPORTED,
+            reason=f"Word overlap {overlap_ratio:.0%} ({len(overlap_words)}/{len(answer_words)} significant terms).",
+            metadata={
+                "method": "heuristic",
+                "overlap_ratio": round(overlap_ratio, 3),
+                "overlap_count": len(overlap_words),
+                "answer_word_count": len(answer_words),
+            },
+        )
+    else:
+        return ValidationResult(
+            status=ValidationStatus.INSUFFICIENT_EVIDENCE,
+            reason=f"Word overlap too low ({overlap_ratio:.0%}); answer may not be grounded in evidence.",
+            metadata={
+                "method": "heuristic",
+                "overlap_ratio": round(overlap_ratio, 3),
+                "overlap_count": len(overlap_words),
+                "answer_word_count": len(answer_words),
+            },
+        )
+
+
+class AnswerValidator:
+    """
+    Component responsible for verifying generated answers against retrieved evidence
+    and structured knowledge at both the answer and individual claim levels.
+    """
+
+    async def validate(
+        self,
+        answer: str,
+        evidence: Optional[RetrievalResult],
+        llm: Optional[BaseLanguageModel] = None,  # retained for interface compatibility
+        workspace: Optional[Any] = None,  # KnowledgeWorkspace
+        evidence_items: Optional[List[Any]] = None,
+        information_needs: Optional[List[Any]] = None,
+    ) -> ValidationResult:
+        cleaned_answer = answer.strip()
+
+        if not cleaned_answer:
+            return ValidationResult(
+                status=ValidationStatus.INSUFFICIENT_EVIDENCE,
+                reason="Empty answer provided for validation.",
+            )
+
+        if (
+            (not evidence or evidence.status != RetrievalStatus.SUCCESS or not evidence.content or not evidence.content.strip())
+            and (not evidence_items)
+            and (not workspace or not workspace.facts)
+        ):
+            return ValidationResult(
+                status=ValidationStatus.INSUFFICIENT_EVIDENCE,
+                reason="No valid Wikipedia evidence content available for validation.",
+            )
+
+        # ── 1. Claim-Level Grounding (Stage 8) ────────────────────────────────
+        from app.knowledge.claims import claim_grounder
+        
+        extracted_claims = claim_grounder.ground_answer(
+            answer=cleaned_answer,
+            workspace=workspace,
+            evidence_items=evidence_items,
+            information_needs=information_needs,
+        )
+
+        unsupported = [
+            c for c in extracted_claims
+            if c.grounding_status in (
+                GroundingStatus.UNSUPPORTED,
+                GroundingStatus.CONFLICTING_EVIDENCE,
+                GroundingStatus.INSUFFICIENT_EVIDENCE,
+            )
+        ]
+        partially_supported = [
+            c for c in extracted_claims
+            if c.grounding_status == GroundingStatus.PARTIALLY_SUPPORTED
+        ]
+        conflicting = [
+            c for c in extracted_claims
+            if c.grounding_status == GroundingStatus.CONFLICTING_EVIDENCE
+        ]
+
+        # ── 2. Determine Overall Validation Status ────────────────────────────
+        if conflicting:
+            status = ValidationStatus.CONFLICTING_EVIDENCE
+            reason = f"Conflicting evidence detected in {len(conflicting)} claim(s)."
+        elif unsupported:
+            # If any material claim is unsupported, answer is UNSUPPORTED
+            status = ValidationStatus.UNSUPPORTED
+            reason = f"{len(unsupported)} of {len(extracted_claims)} claim(s) failed grounding against Wikipedia evidence."
+        elif partially_supported and not any(c.grounding_status == GroundingStatus.SUPPORTED for c in extracted_claims):
+            status = ValidationStatus.PARTIALLY_SUPPORTED
+            reason = f"{len(partially_supported)} claim(s) only partially supported by retrieved evidence."
+        elif not extracted_claims:
+            # Fallback to word-overlap heuristic
+            ev_content = evidence.content if evidence and evidence.content else ""
+            return _heuristic_validate(cleaned_answer, ev_content)
+        else:
+            status = ValidationStatus.SUPPORTED
+            reason = f"All {len(extracted_claims)} claim(s) verified and grounded in Wikipedia evidence."
+
+        return ValidationResult(
+            status=status,
+            reason=reason,
+            grounding_status=status,
+            claims=extracted_claims,
+            unsupported_claims=unsupported + partially_supported,
+            metadata={
+                "claim_count": len(extracted_claims),
+                "supported_count": len(extracted_claims) - len(unsupported) - len(partially_supported),
+                "unsupported_count": len(unsupported),
+                "partially_supported_count": len(partially_supported),
+                "conflicting_count": len(conflicting),
+            },
+        )
+
+
+answer_validator = AnswerValidator()
+

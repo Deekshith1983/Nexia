@@ -92,6 +92,16 @@ export default function App() {
         setConversationId(activeCid);
       }
 
+      const sourcesHeader = response.headers.get('X-Nexia-Sources');
+      let parsedSources = [];
+      if (sourcesHeader) {
+        try {
+          parsedSources = JSON.parse(sourcesHeader);
+        } catch (e) {
+          parsedSources = [];
+        }
+      }
+
       const reader = response.body.getReader();
       const decoder = new TextDecoder('utf-8');
       let accumulatedText = '';
@@ -106,7 +116,7 @@ export default function App() {
         setMessages((prev) =>
           prev.map((msg) =>
             msg.id === nexiaMessageId
-              ? { ...msg, text: accumulatedText }
+              ? { ...msg, text: accumulatedText, sources: parsedSources }
               : msg
           )
         );
@@ -249,6 +259,22 @@ export default function App() {
                             <ReactMarkdown remarkPlugins={[remarkGfm]}>
                               {msg.text}
                             </ReactMarkdown>
+                          </div>
+                        )}
+                        {msg.sources && msg.sources.length > 0 && !msg.stopped && (
+                          <div className="sources-badge-container">
+                            <span className="sources-badge-label">Sources:</span>
+                            {msg.sources.map((src, idx) => (
+                              <a
+                                key={idx}
+                                href={src.url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="source-chip"
+                              >
+                                {src.source} — {src.title}
+                              </a>
+                            ))}
                           </div>
                         )}
                         {msg.stopped && (

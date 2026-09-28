@@ -3,33 +3,51 @@ from pydantic import BaseModel, Field
 from app.core.conversation_manager import Message
 from app.services.wikipedia_retriever import RetrievalResult, RetrievalStatus
 
+
 class GenerationInput(BaseModel):
     """Structured container holding all context required for grounded response generation."""
     original_query: str
     resolved_query: str
     conversation_context: List[Message] = Field(default_factory=list)
     retrieved_evidence: Optional[RetrievalResult] = None
+    structured_knowledge: Optional[str] = None
+    relevant_memories: Optional[List[str]] = None
     is_knowledge_query: bool = True
 
-GROUNDED_SYSTEM_PROMPT = """You are Nexia, a conversational AI agent grounded strictly in Wikipedia factual evidence.
 
-Factual Evidence:
-Source: {source} ({page_title})
-URL: {page_url}
-Evidence Content:
+GROUNDED_SYSTEM_PROMPT = """You are Nexia, an AI assistant that answers questions using Wikipedia evidence.
+
+Wikipedia Evidence ({page_title}):
 {content}
 
-Instructions:
-1. Answer the user's question directly and concisely using ONLY the factual evidence provided above.
-2. Do not invent, assume, or fabricate facts that are not explicitly supported by the evidence.
-3. If the provided evidence does not contain sufficient information to answer the question, clearly state: "I couldn't find sufficient information about that in Wikipedia."
-4. Do not pretend to have accessed information that was not retrieved.
-5. Format your response cleanly using Markdown.
+{structured_knowledge}How to read Wikipedia evidence:
+- Dates in parentheses immediately after a name are birth and death dates. Example: "Marie Curie (7 November 1867 – 4 July 1934)" means she was born on 7 November 1867 and died on 4 July 1934.
+- Use all information present in the evidence to answer the question, including information in parentheses.
+- When the evidence contains multiple articles (indicated by [Article 1: ...] headers), use all of them.
+- When structured facts/relationships are provided, use them to support connected reasoning.
+
+Rules:
+- Answer using ONLY facts present in the evidence above.
+- Match the depth to the question: concise for simple facts, thorough for comparisons or complex topics.
+- If the evidence genuinely does not contain the answer, say: "I couldn't find that in the Wikipedia article."
+- Do not add commentary, caveats, or explanations beyond what the user asked for.
 
 Question: {query}
-Assistant:"""
+Answer:"""
 
-INSUFFICIENT_EVIDENCE_RESPONSE = "I couldn't find sufficient information about that in Wikipedia."
+CONVERSATIONAL_SYSTEM_PROMPT = """You are Nexia, a helpful and concise conversational assistant.
+
+Respond naturally and directly to the user's message. Follow these rules:
+- Be brief and friendly — match the user's conversational tone.
+- Do not list your capabilities unless the user explicitly asks what you can do.
+- Do not describe yourself as an AI assistant or explain what you are, unless asked.
+- Do not start with unnecessary preamble like "Of course!" or "Certainly!".
+- Answer the user's actual message directly, using known user context/preferences if relevant.
+
+{memories}{context}Assistant:"""
+
+INSUFFICIENT_EVIDENCE_RESPONSE = "I couldn't find that in the Wikipedia article."
+
 
 class GroundedGenerator:
     """Component responsible for assembling grounded prompts and handling evidence validation."""
@@ -49,20 +67,32 @@ class GroundedGenerator:
         """Construct the prompt sent to the Language Model Interface."""
         if gen_input.is_knowledge_query and self.has_sufficient_evidence(gen_input):
             ev = gen_input.retrieved_evidence
+            sk_block = f"{gen_input.structured_knowledge}\n" if gen_input.structured_knowledge else ""
             return GROUNDED_SYSTEM_PROMPT.format(
-                source=ev.source,
                 page_title=ev.page_title or "Wikipedia Article",
-                page_url=ev.page_url or "https://en.wikipedia.org",
                 content=ev.content,
+                structured_knowledge=sk_block,
                 query=gen_input.resolved_query,
             )
 
-        # Fallback to standard conversational context prompt for non-knowledge / casual queries
-        prompt_parts = []
-        for msg in gen_input.conversation_context:
+        # Conversational path: build focused system prompt with recent context and relevant memories
+        mem_block = ""
+        if gen_input.relevant_memories:
+            mem_lines = "\n".join(f"- {m}" for m in gen_input.relevant_memories)
+            mem_block = f"Known User Context / Preferences:\n{mem_lines}\n\n"
+
+        context_parts = []
+        # Include last 6 messages for context (avoid bloating the prompt)
+        recent = gen_input.conversation_context[-6:] if gen_input.conversation_context else []
+        for msg in recent:
             role_label = "User" if msg.role == "user" else "Assistant"
-            prompt_parts.append(f"{role_label}: {msg.content}")
-        prompt_parts.append("Assistant:")
-        return "\n\n".join(prompt_parts)
+            context_parts.append(f"{role_label}: {msg.content}")
+        # Append the current user message
+        context_parts.append(f"User: {gen_input.original_query}")
+        context_parts.append("")  # blank line before "Assistant:"
+
+        context_block = "\n".join(context_parts) + "\n" if context_parts else ""
+        return CONVERSATIONAL_SYSTEM_PROMPT.format(memories=mem_block, context=context_block)
+
 
 grounded_generator = GroundedGenerator()
