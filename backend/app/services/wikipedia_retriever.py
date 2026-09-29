@@ -229,8 +229,8 @@ class WikipediaRetriever:
         Generate title variants to try for direct Wikipedia lookup.
 
         Priority order:
-          1. Entity as-is (Wikipedia normalises first char to uppercase)
-          2. Title-cased version ("narendra damodardas modi" → "Narendra Damodardas Modi")
+          1. Title-cased version ("valmiki ramayana" -> "Valmiki Ramayana")
+          2. Entity as-is (if different from title-cased, e.g. "iPhone", "mRNA", "macOS")
           3. First + last word only ("Narendra Modi" from "narendra damodardas modi")
              — useful for "full legal name" entities
         """
@@ -238,12 +238,12 @@ class WikipediaRetriever:
         tc = _title_case(raw)
         variants: List[str] = []
 
-        # Variant 1: as-is
-        variants.append(raw)
+        # Variant 1: title-cased
+        variants.append(tc)
 
-        # Variant 2: title-cased (skip if same as raw)
-        if tc != raw:
-            variants.append(tc)
+        # Variant 2: as-is (skip if same as title-cased)
+        if raw != tc:
+            variants.append(raw)
 
         # Variant 3: first + last word (only if entity has 3+ words)
         words = raw.split()
@@ -269,10 +269,16 @@ class WikipediaRetriever:
             return RetrievalResult(status=RetrievalStatus.NO_RESULTS, query=cleaned_query)
 
         # ── 0. Check Local Cache ──────────────────────────────────────────────
-        cached_result = local_cache_manager.get_wikipedia(cleaned_query, entity=entity, force_refresh=force_refresh)
-        if cached_result is not None:
-            telemetry_tracker.record_wikipedia_call(request_id, duration_ms=0.5, cached=True)
-            return cached_result
+        try:
+            cached_result = local_cache_manager.get_wikipedia(cleaned_query, entity=entity, force_refresh=force_refresh)
+            if cached_result is not None:
+                try:
+                    telemetry_tracker.record_wikipedia_call(request_id, duration_ms=0.5, cached=True)
+                except Exception as t_exc:
+                    logger.debug("[WIKI] telemetry record cached call error: %s", t_exc)
+                return cached_result
+        except Exception as c_exc:
+            logger.warning("[WIKI] cache read failed for query=%r: %s", cleaned_query, c_exc)
 
         t_start = time.monotonic()
         headers = {"User-Agent": self.USER_AGENT}
@@ -297,6 +303,7 @@ class WikipediaRetriever:
                                 "[WIKI] direct lookup success  variant=%r -> title=%r",
                                 variant, actual_title,
                             )
+                            # Step A: Build RetrievalResult
                             result = RetrievalResult(
                                 status=RetrievalStatus.SUCCESS,
                                 query=cleaned_query,
@@ -310,8 +317,20 @@ class WikipediaRetriever:
                                 },
                             )
                             dur_ms = (time.monotonic() - t_start) * 1000.0
-                            telemetry_tracker.record_wikipedia_call(request_id, duration_ms=dur_ms, cached=False)
-                            local_cache_manager.set_wikipedia(cleaned_query, result, entity=entity)
+                            try:
+                                telemetry_tracker.record_wikipedia_call(request_id, duration_ms=dur_ms, cached=False)
+                            except Exception as t_exc:
+                                logger.debug("[WIKI] telemetry record error: %s", t_exc)
+
+                            # Step B: Write to cache in isolated try/except
+                            try:
+                                local_cache_manager.set_wikipedia(cleaned_query, result, entity=entity)
+                            except Exception as c_exc:
+                                logger.warning(
+                                    "[WIKI] cache write failed for query=%r: %s",
+                                    cleaned_query, c_exc, exc_info=True,
+                                )
+
                             return result
 
                     logger.debug(
@@ -332,7 +351,10 @@ class WikipediaRetriever:
 
                 if search_res.status_code != 200:
                     dur_ms = (time.monotonic() - t_start) * 1000.0
-                    telemetry_tracker.record_wikipedia_call(request_id, duration_ms=dur_ms, cached=False)
+                    try:
+                        telemetry_tracker.record_wikipedia_call(request_id, duration_ms=dur_ms, cached=False)
+                    except Exception:
+                        pass
                     return RetrievalResult(
                         status=RetrievalStatus.FAILED,
                         query=cleaned_query,
@@ -344,7 +366,10 @@ class WikipediaRetriever:
 
                 if not search_results:
                     dur_ms = (time.monotonic() - t_start) * 1000.0
-                    telemetry_tracker.record_wikipedia_call(request_id, duration_ms=dur_ms, cached=False)
+                    try:
+                        telemetry_tracker.record_wikipedia_call(request_id, duration_ms=dur_ms, cached=False)
+                    except Exception:
+                        pass
                     return RetrievalResult(status=RetrievalStatus.NO_RESULTS, query=cleaned_query)
 
                 logger.debug(
@@ -358,7 +383,10 @@ class WikipediaRetriever:
                 )
                 if not selected_title:
                     dur_ms = (time.monotonic() - t_start) * 1000.0
-                    telemetry_tracker.record_wikipedia_call(request_id, duration_ms=dur_ms, cached=False)
+                    try:
+                        telemetry_tracker.record_wikipedia_call(request_id, duration_ms=dur_ms, cached=False)
+                    except Exception:
+                        pass
                     return RetrievalResult(status=RetrievalStatus.NO_RESULTS, query=cleaned_query)
 
                 logger.debug("[WIKI] search selected title=%r", selected_title)
@@ -366,7 +394,10 @@ class WikipediaRetriever:
                 summary_data = await self._fetch_summary(client, selected_title)
                 if not summary_data:
                     dur_ms = (time.monotonic() - t_start) * 1000.0
-                    telemetry_tracker.record_wikipedia_call(request_id, duration_ms=dur_ms, cached=False)
+                    try:
+                        telemetry_tracker.record_wikipedia_call(request_id, duration_ms=dur_ms, cached=False)
+                    except Exception:
+                        pass
                     return RetrievalResult(
                         status=RetrievalStatus.NO_RESULTS,
                         query=cleaned_query,
@@ -386,6 +417,7 @@ class WikipediaRetriever:
                     actual_title, page_url, len(extract),
                 )
 
+                # Step A: Build RetrievalResult
                 result = RetrievalResult(
                     status=RetrievalStatus.SUCCESS,
                     query=cleaned_query,
@@ -400,13 +432,28 @@ class WikipediaRetriever:
                     },
                 )
                 dur_ms = (time.monotonic() - t_start) * 1000.0
-                telemetry_tracker.record_wikipedia_call(request_id, duration_ms=dur_ms, cached=False)
-                local_cache_manager.set_wikipedia(cleaned_query, result, entity=entity)
+                try:
+                    telemetry_tracker.record_wikipedia_call(request_id, duration_ms=dur_ms, cached=False)
+                except Exception as t_exc:
+                    logger.debug("[WIKI] telemetry record error: %s", t_exc)
+
+                # Step B: Write to cache in isolated try/except
+                try:
+                    local_cache_manager.set_wikipedia(cleaned_query, result, entity=entity)
+                except Exception as c_exc:
+                    logger.warning(
+                        "[WIKI] cache write failed for query=%r: %s",
+                        cleaned_query, c_exc, exc_info=True,
+                    )
+
                 return result
 
         except (httpx.HTTPError, httpx.TimeoutException, Exception) as e:
             dur_ms = (time.monotonic() - t_start) * 1000.0
-            telemetry_tracker.record_wikipedia_call(request_id, duration_ms=dur_ms, cached=False)
+            try:
+                telemetry_tracker.record_wikipedia_call(request_id, duration_ms=dur_ms, cached=False)
+            except Exception:
+                pass
             logger.warning("[WIKI] retrieval failed: %s", e)
             return RetrievalResult(
                 status=RetrievalStatus.FAILED,

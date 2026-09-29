@@ -25,12 +25,14 @@ class CompletionStatus(str, Enum):
         INSUFFICIENT_KNOWLEDGE — Wikipedia does not contain the needed information
         FAILED                — retrieval or processing failure
         CANCELLED             — the request was cancelled by the user
+        INTERNAL_ERROR        — an unexpected internal exception prevented evidence storage
     """
     SUFFICIENT = "SUFFICIENT"
     MORE_INFORMATION_NEEDED = "MORE_INFORMATION_NEEDED"
     INSUFFICIENT_KNOWLEDGE = "INSUFFICIENT_KNOWLEDGE"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
+    INTERNAL_ERROR = "INTERNAL_ERROR"
 
 
 @dataclass

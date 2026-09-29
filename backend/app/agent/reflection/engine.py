@@ -30,8 +30,17 @@ _STOP_WORDS = {
     "those", "it", "its", "they", "them", "their", "he", "she", "his",
     "her", "we", "us", "our", "you", "your", "i", "me", "my", "and",
     "but", "or", "not", "also", "so", "than", "more", "most", "very",
-    "such", "about", "which", "who", "what", "when", "where", "how",
+    "such", "about", "which", "who", "what", "when", "where", "how", "why",
     "compare", "difference", "differences", "between", "versus", "vs",
+    "tell", "tells", "telling", "told", "ask", "asks", "asking", "asked",
+    "explain", "explains", "explaining", "explained", "explanation",
+    "describe", "describes", "describing", "described", "description",
+    "give", "gives", "giving", "gave", "given", "provide", "provides",
+    "know", "knows", "knowing", "knew", "known", "please", "detail", "details",
+    "info", "information", "summarize", "summary", "summaries", "write",
+    "wrote", "written", "writeup", "overview", "say", "says", "said",
+    "mention", "mentions", "mentioned", "find", "finding", "search", "searching",
+    "show", "showing", "lookup",
 }
 
 
@@ -313,21 +322,32 @@ class ReflectionEngine:
         Extract specific target concepts from the query that are absent from evidence.
         """
         evidence_text = " ".join(e.content.lower() for e in context.evidence)
+        entity_words = set(re.findall(r"\b[a-z]{2,}\b", (qu.entity or "").lower()))
+
         query_words = [
             w for w in re.findall(r"\b[a-z]{3,}\b", resolved_request.lower())
-            if w not in _STOP_WORDS
+            if w not in _STOP_WORDS and w not in entity_words
         ]
 
         # Key topic words in query not found in current evidence
         missing_keywords = [w for w in query_words if w not in evidence_text]
-        if missing_keywords and qu.entity:
-            # Construct a targeted query combining the main entity and missing keyword
-            kw_str = " ".join(missing_keywords[:2])
-            return f"{qu.entity} {kw_str}"
+        if missing_keywords:
+            if qu.entity:
+                # Construct a targeted query combining the main entity and missing keyword
+                kw_str = " ".join(missing_keywords[:2])
+                return f"{qu.entity} {kw_str}".strip()
+            else:
+                return " ".join(missing_keywords[:3]).strip()
 
-        # If no evidence at all, use the entity or resolved request
+        # If no evidence at all, return the entity or cleaned query
         if not context.evidence:
-            return qu.entity or resolved_request
+            if qu.entity and qu.entity.strip():
+                return qu.entity.strip()
+            clean_words = [
+                w for w in re.findall(r"\b[a-zA-Z0-9_-]+\b", resolved_request)
+                if w.lower() not in _STOP_WORDS
+            ]
+            return " ".join(clean_words) if clean_words else resolved_request
 
         return None
 

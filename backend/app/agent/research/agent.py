@@ -296,8 +296,25 @@ class WikipediaResearchAgent:
 
         # ── 4. Finalize ───────────────────────────────────────────────────────
         plan.status = PlanStatus.COMPLETE
-        # If loop exited without enough evidence, mark appropriately
-        if context.completion_status == CompletionStatus.MORE_INFORMATION_NEEDED:
+
+        # Invariant check: If any action fetched SUCCESS with content but context.evidence is empty,
+        # flag an INTERNAL_ERROR rather than misclassifying as INSUFFICIENT_KNOWLEDGE.
+        had_successful_fetch = any(
+            bool(
+                getattr(a, "result", None)
+                and getattr(a.result, "status", None) == RetrievalStatus.SUCCESS
+                and getattr(a.result, "content", None)
+            )
+            for a in context.completed_actions
+        )
+
+        if had_successful_fetch and len(context.evidence) == 0:
+            logger.error(
+                "[RESEARCH] Invariant violation: Wikipedia returned SUCCESS with non-empty extract, "
+                "but context.evidence is 0! Setting status=INTERNAL_ERROR."
+            )
+            context.completion_status = CompletionStatus.INTERNAL_ERROR
+        elif context.completion_status == CompletionStatus.MORE_INFORMATION_NEEDED:
             if context.evidence:
                 context.completion_status = CompletionStatus.SUFFICIENT
             else:
@@ -530,8 +547,8 @@ class WikipediaResearchAgent:
         except Exception as exc:
             action.status = ResearchActionStatus.FAILED
             action.error = str(exc)
-            logger.warning(
-                "[RESEARCH] action=%s exception: %s", action.action_id, exc
+            logger.error(
+                "[RESEARCH] action=%s unhandled exception: %s", action.action_id, exc, exc_info=True
             )
 
     # ── Evaluation ────────────────────────────────────────────────────────────

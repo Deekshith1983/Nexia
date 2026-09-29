@@ -103,19 +103,23 @@ class LocalCacheManager:
     def set_wikipedia(
         self,
         query_or_title: str,
-        value_or_entity: Any,
-        entity_or_val: Optional[Any] = None,
+        value: Any = None,
+        entity: Optional[str] = None,
         ttl_seconds: Optional[float] = None,
         is_time_sensitive: bool = False,
         is_stable: bool = True,
+        **kwargs: Any,
     ) -> None:
         """Store Wikipedia evidence in cache with bounded eviction."""
-        if hasattr(value_or_entity, "page_title") or hasattr(value_or_entity, "status"):
-            val = value_or_entity
-            entity = entity_or_val if isinstance(entity_or_val, str) else None
-        else:
-            entity = str(value_or_entity) if value_or_entity else None
-            val = entity_or_val
+        # Support keyword arguments 'result' or positional swaps
+        if value is None and "result" in kwargs:
+            value = kwargs["result"]
+        if entity is None and "entity" in kwargs:
+            entity = kwargs["entity"]
+
+        # If value is a string (and not a result object) while entity has retrieval attributes, swap them
+        if isinstance(value, str) and not hasattr(value, "status") and entity is not None and (hasattr(entity, "status") or hasattr(entity, "page_title")):
+            value, entity = entity, value
 
         key = _norm_key(f"{query_or_title}::{entity or ''}")
         ttl = ttl_seconds if ttl_seconds is not None else self.default_ttl
@@ -127,7 +131,7 @@ class LocalCacheManager:
 
         entry = CacheEntry(
             key=key,
-            value=val,
+            value=value,
             created_at=time.time(),
             ttl_seconds=ttl,
             is_time_sensitive=is_time_sensitive or (not is_stable),
