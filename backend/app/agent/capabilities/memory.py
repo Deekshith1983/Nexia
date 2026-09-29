@@ -46,6 +46,8 @@ class MemoryCapability(Capability):
         # Record user message in conversation history
         conversation_manager.add_message(cid, "user", ctx.original_query)
 
+        from app.personalization.manager import personalization_manager
+
         response_text = ""
         if not mem_cmd:
             response_text = "I wasn't able to understand the memory instruction."
@@ -56,6 +58,13 @@ class MemoryCapability(Capability):
                 memory_type=mem_cmd.target_type,
                 source="user_explicit",
             )
+            # Also extract and store structured preference if applicable
+            parsed_prefs = personalization_manager.parse_preference_from_query(mem_cmd.target_content)
+            for cat, key, val in parsed_prefs:
+                personalization_manager.store_preference(
+                    category=cat, key=key, value=val, user_id=user_id
+                )
+
             if saved:
                 response_text = f"I'll remember that: {saved.content}"
             else:
@@ -66,7 +75,12 @@ class MemoryCapability(Capability):
                 query_or_pattern=mem_cmd.target_content,
                 user_id=user_id,
             )
-            if deleted_count > 0:
+            pref_count = personalization_manager.forget_preference(
+                pattern=mem_cmd.target_content,
+                user_id=user_id,
+            )
+            total_deleted = max(deleted_count, pref_count)
+            if total_deleted > 0:
                 response_text = f"I've forgotten what I remembered about: {mem_cmd.target_content}"
             else:
                 response_text = f"I couldn't find any active memories matching '{mem_cmd.target_content}'."
@@ -76,9 +90,13 @@ class MemoryCapability(Capability):
                 query=mem_cmd.target_content,
                 user_id=user_id,
             )
-            if memories:
-                lines = [f"- {m.content}" for m in memories]
-                response_text = "Here is what I remember:\n" + "\n".join(lines)
+            prefs = personalization_manager.list_preferences(user_id=user_id, active_only=True)
+            pref_lines = [f"- [Preference] {p.category.value} ({p.key}): {p.value}" for p in prefs] if "preference" in mem_cmd.target_content.lower() else []
+            mem_lines = [f"- {m.content}" for m in memories]
+
+            combined_lines = list(dict.fromkeys(pref_lines + mem_lines))
+            if combined_lines:
+                response_text = "Here is what I remember:\n" + "\n".join(combined_lines)
             else:
                 response_text = f"I don't have any saved memories about {mem_cmd.target_content}."
 

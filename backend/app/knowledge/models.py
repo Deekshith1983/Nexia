@@ -35,12 +35,59 @@ class GroundingStatus(str, Enum):
     CONFLICTING_EVIDENCE = "CONFLICTING_EVIDENCE"
 
 
+class SupportLevel(str, Enum):
+    """Qualitative epistemic support level for claims and knowledge."""
+    WELL_SUPPORTED = "WELL_SUPPORTED"
+    PARTIALLY_SUPPORTED = "PARTIALLY_SUPPORTED"
+    UNCERTAIN = "UNCERTAIN"
+    CONFLICTING = "CONFLICTING"
+    INSUFFICIENT = "INSUFFICIENT"
+    UNVERIFIED = "UNVERIFIED"
+
+
+class ConflictStatus(str, Enum):
+    """Lifecycle status of a factual conflict."""
+    UNRESOLVED = "UNRESOLVED"
+    RESOLVED = "RESOLVED"
+    PERSISTENT_CONFLICT = "PERSISTENT_CONFLICT"
+
+
 class EvidenceReference(BaseModel):
     """Provenance tracking connecting structured knowledge to source Wikipedia evidence."""
     page_title: str
     page_url: str
     evidence_id: str
     snippet: Optional[str] = None
+
+
+class Conflict(BaseModel):
+    """Structured representation of conflicting evidence values for a topic, fact, or claim."""
+    id: str = Field(default_factory=lambda: str(uuid.uuid4())[:8])
+    topic: str
+    fact_or_claim_id: Optional[str] = None
+    conflicting_values: List[str] = Field(default_factory=list)
+    evidence_refs: List[EvidenceReference] = Field(default_factory=list)
+    sources: List[str] = Field(default_factory=list)
+    status: ConflictStatus = ConflictStatus.UNRESOLVED
+    resolution_notes: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class KnowledgeQuality(BaseModel):
+    """
+    Comprehensive structured knowledge quality assessment.
+    Represents epistemic support, evidence coverage, consistency, and agreement without fake probabilities.
+    """
+    support_level: SupportLevel = SupportLevel.UNVERIFIED
+    evidence_coverage: Dict[str, Any] = Field(default_factory=dict)
+    consistency: str = "CONSISTENT"  # "CONSISTENT", "CONFLICTING", "UNKNOWN"
+    source_count: int = 0
+    evidence_agreement_count: int = 0
+    unresolved_items: List[str] = Field(default_factory=list)
+    temporal_context: Optional[str] = None
+    is_fresh: bool = True
+    conflicts: List[Conflict] = Field(default_factory=list)
+    status: str = "PENDING"
 
 
 class Entity(BaseModel):
@@ -61,6 +108,7 @@ class Fact(BaseModel):
     evidence_refs: List[EvidenceReference] = Field(default_factory=list)
     status: FactStatus = FactStatus.SUPPORTED
     confidence: float = 1.0
+    temporal_scope: Optional[str] = None
 
 
 class Relationship(BaseModel):
@@ -83,6 +131,9 @@ class Claim(BaseModel):
     source_refs: List[Dict[str, Any]] = Field(default_factory=list)
     grounding_status: GroundingStatus = GroundingStatus.SUPPORTED
     status: Optional[str] = None  # retained for backward compatibility with Stage 6
+    support_level: Optional[SupportLevel] = None
+    quality: Optional[KnowledgeQuality] = None
+    temporal_scope: Optional[str] = None
     information_need_id: Optional[str] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
@@ -95,6 +146,9 @@ class Claim(BaseModel):
         elif self.grounding_status and not self.status:
             self.status = self.grounding_status.value
 
+        if self.quality and not self.support_level:
+            self.support_level = self.quality.support_level
+
 
 class Contradiction(BaseModel):
     """Explicit representation of conflicting factual claims in retrieved evidence."""
@@ -105,3 +159,4 @@ class Contradiction(BaseModel):
     evidence_ref_a: Optional[EvidenceReference] = None
     evidence_ref_b: Optional[EvidenceReference] = None
     details: str
+

@@ -173,12 +173,16 @@ class WikipediaKnowledgeCapability(Capability):
             augmented_query = wikipedia_research_agent.augment_query_for_intent(
                 ctx.resolved_query, qu, len(research_ctx.evidence)
             )
+            effective_profile = request.input.get("effective_profile")
+            pers_guidance = effective_profile.to_guidance_text() if effective_profile else None
+
             gen_input = GenerationInput(
                 original_query=ctx.original_query,
                 resolved_query=augmented_query,
                 conversation_context=state.messages,
                 retrieved_evidence=combined_retrieval,
                 structured_knowledge=structured_summary if structured_summary else None,
+                personalization_guidance=pers_guidance,
                 is_knowledge_query=True,
             )
 

@@ -58,6 +58,46 @@ class ResearchContext:
     navigation_history: Optional[Any] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 
+    @classmethod
+    def create(
+        cls,
+        request_id: str = "test_req",
+        conversation_id: str = "test_conv",
+        original_request: str = "",
+        resolved_request: str = "",
+        objectives: Optional[List[str]] = None,
+        plan: Optional[ResearchPlan] = None,
+        completed_actions: Optional[List[ResearchAction]] = None,
+        pending_actions: Optional[List[ResearchAction]] = None,
+        evidence: Optional[List[EvidenceItem]] = None,
+        findings: Optional[List[Finding]] = None,
+        sources: Optional[List[Any]] = None,
+        unresolved_questions: Optional[List[str]] = None,
+        completion_status: CompletionStatus = CompletionStatus.MORE_INFORMATION_NEEDED,
+        information_needs: Optional[List[Any]] = None,
+        navigation_history: Optional[Any] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> ResearchContext:
+        """Ergonomic factory for creating a ResearchContext with sensible defaults."""
+        return cls(
+            request_id=request_id,
+            conversation_id=conversation_id,
+            original_request=original_request,
+            resolved_request=resolved_request or original_request,
+            objectives=objectives or [],
+            plan=plan,
+            completed_actions=completed_actions or [],
+            pending_actions=pending_actions or [],
+            evidence=evidence or [],
+            findings=findings or [],
+            sources=sources or [],
+            unresolved_questions=unresolved_questions or [],
+            completion_status=completion_status,
+            information_needs=information_needs or [],
+            navigation_history=navigation_history,
+            metadata=metadata or {},
+        )
+
     def to_summary_dict(self) -> Dict[str, Any]:
         """Lightweight summary for state metadata storage."""
         return {

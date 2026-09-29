@@ -48,6 +48,9 @@ from app.services.wikipedia_navigator import (
     NavigationHistory, NavigationStep, WikipediaArticle, WikipediaNavigator, wikipedia_navigator,
 )
 
+from app.optimization.concurrency import bounded_executor
+from app.optimization.telemetry import telemetry_tracker
+
 logger = logging.getLogger("nexia.agent.research")
 
 # ── Configuration ─────────────────────────────────────────────────────────────
@@ -72,9 +75,11 @@ def _new_action_id() -> str:
     return str(uuid.uuid4())[:8]
 
 
-def _norm(text: str) -> str:
+def _norm(text: Optional[str]) -> str:
     """Lowercase, strip diacritics, collapse whitespace — for duplicate detection."""
-    nfkd = unicodedata.normalize("NFKD", text)
+    if not text:
+        return ""
+    nfkd = unicodedata.normalize("NFKD", str(text))
     ascii_str = "".join(c for c in nfkd if not unicodedata.combining(c))
     return re.sub(r"\s+", " ", ascii_str).strip().lower()
 
@@ -189,7 +194,40 @@ class WikipediaResearchAgent:
             request_id[:8], len(plan.actions), len(needs), resolved_query[:80], existing_context is not None,
         )
 
-        # ── 3. Execute loop ───────────────────────────────────────────────────
+        # ── 3. Bounded Parallel Initial Execution (Stage 13) ──────────────────
+        if len(context.pending_actions) > 1 and all(
+            a.action_type == ResearchActionType.WIKIPEDIA_RETRIEVE for a in context.pending_actions
+        ):
+            independent_actions = list(context.pending_actions)
+            context.pending_actions.clear()
+
+            async def _run_single_action(act: ResearchAction):
+                if self._is_duplicate(act, context):
+                    act.status = ResearchActionStatus.SKIPPED
+                    return act
+                act.status = ResearchActionStatus.RUNNING
+                t_act = time.monotonic()
+                await self._execute_action(act, context)
+                act.duration_ms = int((time.monotonic() - t_act) * 1000)
+                return act
+
+            task_factories = [
+                (lambda a=action: _run_single_action(a))
+                for action in independent_actions
+            ]
+            completed = await bounded_executor.run_parallel(task_factories)
+            for res in completed:
+                if isinstance(res, ResearchAction):
+                    context.completed_actions.append(res)
+
+            # Evaluate initial parallel outcomes
+            temp_ws = KnowledgeWorkspace(run_id=request_id)
+            for ev in context.evidence:
+                knowledge_extractor.extract_from_evidence(ev, temp_ws)
+            query_decomposer.evaluate_and_adapt(context.information_needs, context, temp_ws)
+            self._evaluate_completion(context, qu)
+
+        # ── 3b. Execute sequential loop for remaining / follow-up needs ──────
         while (context.pending_actions or any(n.status != NeedStatus.SATISFIED for n in context.information_needs)) and self._should_continue(context):
             if not context.pending_actions:
                 # Plan next action from unresolved information needs

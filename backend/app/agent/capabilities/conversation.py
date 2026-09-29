@@ -52,12 +52,16 @@ class ConversationCapability(Capability):
         relevant_memories = ctx.metadata.get("relevant_memories", [])
         memory_contents = [m.content if hasattr(m, "content") else str(m) for m in relevant_memories]
 
+        effective_profile = request.input.get("effective_profile")
+        pers_guidance = effective_profile.to_guidance_text() if effective_profile else None
+
         gen_input = GenerationInput(
             original_query=ctx.original_query,
             resolved_query=ctx.resolved_query,
             conversation_context=state.messages,
             retrieved_evidence=None,
             relevant_memories=memory_contents if memory_contents else None,
+            personalization_guidance=pers_guidance,
             is_knowledge_query=False,
         )
 
@@ -75,8 +79,11 @@ class ConversationCapability(Capability):
                     accumulated += token
                     yield token
             finally:
-                gen_ms = int((time.monotonic() - gen_start) * 1000)
+                gen_sec = time.monotonic() - gen_start
+                gen_ms = int(gen_sec * 1000)
                 total_ms = int((time.monotonic() - t_start) * 1000)
+                from app.optimization.telemetry import telemetry_tracker
+                telemetry_tracker.record_generation(gen_sec)
                 if accumulated.strip():
                     conversation_manager.add_message(cid, "assistant", accumulated)
                 logger.debug(

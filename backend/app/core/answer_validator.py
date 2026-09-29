@@ -1,10 +1,14 @@
-import re
+import hashlib
 import logging
+import re
+import time
 from typing import Any, Dict, List, Optional, Set
 from pydantic import BaseModel, Field
 from app.core.llm_interface import BaseLanguageModel
 from app.services.wikipedia_retriever import RetrievalResult, RetrievalStatus
 from app.knowledge.models import Claim, GroundingStatus
+from app.optimization.cache import local_cache_manager
+from app.optimization.telemetry import telemetry_tracker
 
 logger = logging.getLogger("nexia.validator")
 
@@ -115,19 +119,42 @@ class AnswerValidator:
         evidence_items: Optional[List[Any]] = None,
         information_needs: Optional[List[Any]] = None,
     ) -> ValidationResult:
+        start_t = time.perf_counter()
         cleaned_answer = answer.strip()
 
         if not cleaned_answer:
+            telemetry_tracker.record_validation(time.perf_counter() - start_t)
             return ValidationResult(
                 status=ValidationStatus.INSUFFICIENT_EVIDENCE,
                 reason="Empty answer provided for validation.",
             )
+
+        # ── Evidence Fingerprinting & Cache Check (Stage 13) ─────────────────
+        ev_text_parts = []
+        if evidence and evidence.content:
+            ev_text_parts.append(evidence.content)
+        if evidence_items:
+            for item in evidence_items:
+                ev_text_parts.append(getattr(item, "content", str(item)))
+        if workspace and getattr(workspace, "facts", None):
+            for fact in workspace.facts:
+                ev_text_parts.append(f"{fact.subject}-{fact.predicate}-{fact.object_value}")
+        
+        raw_ev_str = "|".join(ev_text_parts)
+        ev_fingerprint = hashlib.sha256(raw_ev_str.encode("utf-8")).hexdigest()[:16]
+
+        cached_val = local_cache_manager.get_validation(cleaned_answer, ev_fingerprint)
+        if cached_val is not None:
+            logger.debug("[VALIDATOR] Returning cached validation result.")
+            telemetry_tracker.record_validation(time.perf_counter() - start_t)
+            return cached_val
 
         if (
             (not evidence or evidence.status != RetrievalStatus.SUCCESS or not evidence.content or not evidence.content.strip())
             and (not evidence_items)
             and (not workspace or not workspace.facts)
         ):
+            telemetry_tracker.record_validation(time.perf_counter() - start_t)
             return ValidationResult(
                 status=ValidationStatus.INSUFFICIENT_EVIDENCE,
                 reason="No valid Wikipedia evidence content available for validation.",
@@ -139,7 +166,7 @@ class AnswerValidator:
         extracted_claims = claim_grounder.ground_answer(
             answer=cleaned_answer,
             workspace=workspace,
-            evidence_items=evidence_items,
+            evidence_items=evidence_items or ([evidence] if evidence else None),
             information_needs=information_needs,
         )
 
@@ -160,12 +187,37 @@ class AnswerValidator:
             if c.grounding_status == GroundingStatus.CONFLICTING_EVIDENCE
         ]
 
-        # ── 2. Determine Overall Validation Status ────────────────────────────
-        if conflicting:
+        # ── 2. Check for Acknowledged / Hedged Conflicts ─────────────────────
+        has_ws_conflict = bool(
+            workspace and (
+                getattr(workspace, "has_unresolved_conflicts", lambda: False)()
+                or bool(getattr(workspace, "contradictions", None))
+            )
+        )
+        hedged_conflict = False
+        if (conflicting or has_ws_conflict) and any(
+            h in cleaned_answer.lower()
+            for h in ["conflict", "conflicting", "differ", "differing", "dispute", "disputed", "uncertain", "not definitive", "varies", "contested", "multiple accounts", "differing accounts"]
+        ):
+            hedged_conflict = True
+
+        # When a conflict is hedged, conflicting claims describing the dispute and meta-hedging statements are accepted
+        if hedged_conflict:
+            unsupported = [
+                c for c in extracted_claims
+                if c.grounding_status in (GroundingStatus.UNSUPPORTED, GroundingStatus.INSUFFICIENT_EVIDENCE)
+                and not any(
+                    h in c.statement.lower()
+                    for h in ["conflict", "conflicting", "differ", "differing", "dispute", "disputed", "uncertain", "not definitive", "varies", "contested", "multiple accounts", "differing accounts"]
+                )
+            ]
+
+        # ── 3. Determine Overall Validation Status ────────────────────────────
+        if conflicting and not hedged_conflict:
             status = ValidationStatus.CONFLICTING_EVIDENCE
-            reason = f"Conflicting evidence detected in {len(conflicting)} claim(s)."
+            reason = f"Conflicting evidence detected in {len(conflicting)} claim(s) without appropriate qualification."
         elif unsupported:
-            # If any material claim is unsupported, answer is UNSUPPORTED
+            # If any material factual claim is unsupported, answer is UNSUPPORTED
             status = ValidationStatus.UNSUPPORTED
             reason = f"{len(unsupported)} of {len(extracted_claims)} claim(s) failed grounding against Wikipedia evidence."
         elif partially_supported and not any(c.grounding_status == GroundingStatus.SUPPORTED for c in extracted_claims):
@@ -174,25 +226,38 @@ class AnswerValidator:
         elif not extracted_claims:
             # Fallback to word-overlap heuristic
             ev_content = evidence.content if evidence and evidence.content else ""
-            return _heuristic_validate(cleaned_answer, ev_content)
+            res = _heuristic_validate(cleaned_answer, ev_content)
+            local_cache_manager.set_validation(cleaned_answer, ev_fingerprint, res)
+            telemetry_tracker.record_validation(time.perf_counter() - start_t)
+            return res
         else:
             status = ValidationStatus.SUPPORTED
             reason = f"All {len(extracted_claims)} claim(s) verified and grounded in Wikipedia evidence."
 
-        return ValidationResult(
+        workspace_quality = None
+        if workspace and hasattr(workspace, "evaluate_workspace_quality"):
+            workspace_quality = workspace.evaluate_workspace_quality(information_needs, evidence_items)
+
+        result = ValidationResult(
             status=status,
             reason=reason,
             grounding_status=status,
             claims=extracted_claims,
-            unsupported_claims=unsupported + partially_supported,
+            unsupported_claims=[] if hedged_conflict else (unsupported + partially_supported),
             metadata={
                 "claim_count": len(extracted_claims),
                 "supported_count": len(extracted_claims) - len(unsupported) - len(partially_supported),
                 "unsupported_count": len(unsupported),
                 "partially_supported_count": len(partially_supported),
                 "conflicting_count": len(conflicting),
+                "hedged_conflict": hedged_conflict,
+                "knowledge_quality": workspace_quality.model_dump() if workspace_quality else None,
             },
         )
+
+        local_cache_manager.set_validation(cleaned_answer, ev_fingerprint, result)
+        telemetry_tracker.record_validation(time.perf_counter() - start_t)
+        return result
 
 
 answer_validator = AnswerValidator()

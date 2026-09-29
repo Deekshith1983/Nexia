@@ -10,8 +10,8 @@ import unicodedata
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from app.knowledge.models import (
-    Claim, Contradiction, EvidenceReference, Fact, FactStatus,
-    GroundingStatus, Relationship,
+    Claim, Conflict, ConflictStatus, Contradiction, EvidenceReference, Fact,
+    FactStatus, GroundingStatus, KnowledgeQuality, Relationship, SupportLevel,
 )
 
 logger = logging.getLogger("nexia.knowledge.claims")
@@ -183,156 +183,214 @@ class ClaimGrounder:
         stmt_terms = _significant_terms(statement_clean)
         evidence_list = evidence_items or []
 
-        # ── 1. Check for material contradictions in workspace ─────────────────
+        # ── 1. Check for material contradictions & conflicts in workspace ─────
         contradiction_found = False
         matching_contra: Optional[Contradiction] = None
+        matching_conflict: Optional[Conflict] = None
         if workspace and getattr(workspace, "contradictions", None):
             for c in workspace.contradictions:
                 topic_terms = _significant_terms(c.topic)
-                if topic_terms and topic_terms.issubset(stmt_terms):
+                first_word = _norm(c.topic.split()[0]) if c.topic else ""
+                if topic_terms and (topic_terms.issubset(stmt_terms) or (first_word and first_word in stmt_terms)):
                     contradiction_found = True
                     matching_contra = c
                     break
 
-        if contradiction_found and matching_contra:
-            return Claim(
+        if not contradiction_found and workspace and getattr(workspace, "conflicts", None):
+            for cf in workspace.conflicts:
+                if cf.status == ConflictStatus.UNRESOLVED:
+                    cf_terms = _significant_terms(cf.topic)
+                    first_word = _norm(cf.topic.split()[0]) if cf.topic else ""
+                    if cf_terms and (cf_terms.issubset(stmt_terms) or (first_word and first_word in stmt_terms)):
+                        contradiction_found = True
+                        matching_conflict = cf
+                        break
+
+        claim: Claim
+        if contradiction_found:
+            ev_refs = []
+            s_refs = []
+            c_id = ""
+            details = ""
+            if matching_contra:
+                ev_refs = [r for r in [matching_contra.evidence_ref_a, matching_contra.evidence_ref_b] if r]
+                s_refs = [r.model_dump() for r in ev_refs]
+                c_id = matching_contra.id
+                details = matching_contra.details
+            elif matching_conflict:
+                ev_refs = list(matching_conflict.evidence_refs)
+                s_refs = [r.model_dump() for r in ev_refs]
+                c_id = matching_conflict.id
+                details = f"Conflicting values: {matching_conflict.conflicting_values}"
+
+            claim = Claim(
                 statement=statement_clean,
                 grounding_status=GroundingStatus.CONFLICTING_EVIDENCE,
-                evidence_refs=[
-                    r for r in [matching_contra.evidence_ref_a, matching_contra.evidence_ref_b] if r
-                ],
-                source_refs=[
-                    r.model_dump() for r in [matching_contra.evidence_ref_a, matching_contra.evidence_ref_b] if r
-                ],
+                evidence_refs=ev_refs,
+                source_refs=s_refs,
                 metadata={
-                    "contradiction_id": matching_contra.id,
-                    "details": matching_contra.details,
+                    "conflict_id": c_id,
+                    "details": details,
                 },
             )
+        else:
+            # ── 2. Collect matching evidence and facts ────────────────────────────
+            matched_evidence_refs: List[EvidenceReference] = []
+            matched_fact_ids: List[str] = []
+            matched_rel_ids: List[str] = []
 
-        # ── 2. Collect matching evidence and facts ────────────────────────────
-        matched_evidence_refs: List[EvidenceReference] = []
-        matched_fact_ids: List[str] = []
-        matched_rel_ids: List[str] = []
+            # Check workspace facts
+            if workspace and getattr(workspace, "facts", None):
+                for fact in workspace.facts:
+                    fact_terms = _significant_terms(f"{fact.subject} {fact.predicate} {fact.object_value}")
+                    if fact_terms and len(fact_terms & stmt_terms) >= 2:
+                        matched_fact_ids.append(fact.id)
+                        for ref in fact.evidence_refs:
+                            if not any(r.evidence_id == ref.evidence_id for r in matched_evidence_refs):
+                                matched_evidence_refs.append(ref)
 
-        # Check workspace facts
-        if workspace and getattr(workspace, "facts", None):
-            for fact in workspace.facts:
-                fact_terms = _significant_terms(f"{fact.subject} {fact.predicate} {fact.object_value}")
-                if fact_terms and len(fact_terms & stmt_terms) >= 2:
-                    matched_fact_ids.append(fact.id)
-                    for ref in fact.evidence_refs:
-                        if not any(r.evidence_id == ref.evidence_id for r in matched_evidence_refs):
-                            matched_evidence_refs.append(ref)
+            # Check workspace relationships
+            if workspace and getattr(workspace, "relationships", None):
+                for rel in workspace.relationships:
+                    rel_terms = _significant_terms(f"{rel.source_entity} {rel.relation} {rel.target_entity}")
+                    if rel_terms and len(rel_terms & stmt_terms) >= 2:
+                        matched_rel_ids.append(rel.id)
+                        for ref in rel.evidence_refs:
+                            if not any(r.evidence_id == ref.evidence_id for r in matched_evidence_refs):
+                                matched_evidence_refs.append(ref)
 
-        # Check workspace relationships
-        if workspace and getattr(workspace, "relationships", None):
-            for rel in workspace.relationships:
-                rel_terms = _significant_terms(f"{rel.source_entity} {rel.relation} {rel.target_entity}")
-                if rel_terms and len(rel_terms & stmt_terms) >= 2:
-                    matched_rel_ids.append(rel.id)
-                    for ref in rel.evidence_refs:
-                        if not any(r.evidence_id == ref.evidence_id for r in matched_evidence_refs):
-                            matched_evidence_refs.append(ref)
-
-        # Check direct text evidence items
-        evidence_text_combined = " ".join(getattr(e, "content", "") for e in evidence_list).lower()
-        if not matched_evidence_refs and evidence_list:
-            for ev in evidence_list:
-                ev_content = getattr(ev, "content", "").lower()
-                ev_terms = _significant_terms(ev_content)
-                if stmt_terms and len(stmt_terms & ev_terms) / len(stmt_terms) >= 0.25:
-                    matched_evidence_refs.append(
-                        EvidenceReference(
-                            page_title=getattr(ev, "page_title", "Wikipedia"),
-                            page_url=getattr(ev, "page_url", "https://en.wikipedia.org"),
-                            evidence_id=getattr(ev, "action_id", "ev_0"),
+            # Check direct text evidence items
+            evidence_text_combined = " ".join(getattr(e, "content", "") for e in evidence_list).lower()
+            if not matched_evidence_refs and evidence_list:
+                for ev in evidence_list:
+                    ev_content = getattr(ev, "content", "").lower()
+                    ev_terms = _significant_terms(ev_content)
+                    if stmt_terms and len(stmt_terms & ev_terms) / len(stmt_terms) >= 0.25:
+                        matched_evidence_refs.append(
+                            EvidenceReference(
+                                page_title=getattr(ev, "page_title", "Wikipedia"),
+                                page_url=getattr(ev, "page_url", "https://en.wikipedia.org"),
+                                evidence_id=getattr(ev, "action_id", "ev_0"),
+                            )
                         )
-                    )
 
-        # ── 3. Evaluate Grounding Precision (Dates, Entities, Overlap) ────────
-        # Extract 4-digit years or specific numbers in statement
-        years_in_stmt = set(re.findall(r"\b(1\d{3}|20\d{2})\b", statement_clean))
-        if years_in_stmt:
-            # Check if all mentioned years exist in evidence
-            unsupported_years = [y for y in years_in_stmt if y not in evidence_text_combined]
-            if unsupported_years:
-                logger.debug(
-                    "[CLAIM GROUNDER] Statement contains unsupported year(s) %s: %r",
-                    unsupported_years, statement_clean
-                )
-                # If statement has other supported terms, it's UNSUPPORTED (refuted/unverified date)
-                return Claim(
+            # ── 3. Evaluate Grounding Precision (Dates, Entities, Overlap) ────────
+            years_in_stmt = set(re.findall(r"\b(1\d{3}|20\d{2})\b", statement_clean))
+            if years_in_stmt:
+                unsupported_years = [y for y in years_in_stmt if y not in evidence_text_combined]
+                if unsupported_years:
+                    logger.debug(
+                        "[CLAIM GROUNDER] Statement contains unsupported year(s) %s: %r",
+                        unsupported_years, statement_clean
+                    )
+                    claim = Claim(
+                        statement=statement_clean,
+                        grounding_status=GroundingStatus.UNSUPPORTED,
+                        supporting_fact_ids=matched_fact_ids,
+                        evidence_refs=matched_evidence_refs,
+                        source_refs=[r.model_dump() for r in matched_evidence_refs],
+                        metadata={"unsupported_tokens": unsupported_years, "reason": "Specific date/number unverified"},
+                    )
+                    if workspace and hasattr(workspace, "evaluate_claim_quality"):
+                        workspace.evaluate_claim_quality(claim, evidence_list)
+                    return claim
+
+            if not stmt_terms:
+                claim = Claim(
                     statement=statement_clean,
-                    grounding_status=GroundingStatus.UNSUPPORTED,
-                    supporting_fact_ids=matched_fact_ids,
+                    grounding_status=GroundingStatus.SUPPORTED,
                     evidence_refs=matched_evidence_refs,
                     source_refs=[r.model_dump() for r in matched_evidence_refs],
-                    metadata={"unsupported_tokens": unsupported_years, "reason": "Specific date/number unverified"},
                 )
+                if workspace and hasattr(workspace, "evaluate_claim_quality"):
+                    workspace.evaluate_claim_quality(claim, evidence_list)
+                return claim
 
-        if not stmt_terms:
-            return Claim(
+            # Check term overlap with evidence
+            ev_all_terms = _significant_terms(evidence_text_combined)
+            overlap_terms = stmt_terms & ev_all_terms
+            overlap_ratio = len(overlap_terms) / len(stmt_terms) if stmt_terms else 0.0
+
+            # Check multi-clause / compound statements (e.g. "X and Y")
+            clauses = re.split(r"\s+and\s+|\s+but\s+|;\s*", statement_clean)
+            is_compound = len(clauses) > 1 and all(len(c.strip()) > 15 for c in clauses)
+            if is_compound:
+                clause_overlaps = []
+                for c in clauses:
+                    c_terms = _significant_terms(c)
+                    c_ratio = len(c_terms & ev_all_terms) / len(c_terms) if c_terms else 0.0
+                    clause_overlaps.append(c_ratio)
+                
+                if any(r >= 0.25 for r in clause_overlaps) and any(r < 0.20 for r in clause_overlaps):
+                    claim = Claim(
+                        statement=statement_clean,
+                        grounding_status=GroundingStatus.PARTIALLY_SUPPORTED,
+                        supporting_fact_ids=matched_fact_ids,
+                        evidence_refs=matched_evidence_refs,
+                        source_refs=[r.model_dump() for r in matched_evidence_refs],
+                        metadata={"clause_overlaps": clause_overlaps, "overlap_ratio": round(overlap_ratio, 3)},
+                    )
+                    if workspace and hasattr(workspace, "evaluate_claim_quality"):
+                        workspace.evaluate_claim_quality(claim, evidence_list)
+                    return claim
+
+            # ── 4. Grounding Status Decision ─────────────────────────────────────
+            if not ev_all_terms:
+                status = GroundingStatus.INSUFFICIENT_EVIDENCE
+            elif overlap_ratio >= 0.25:
+                status = GroundingStatus.SUPPORTED
+            elif overlap_ratio >= 0.15:
+                status = GroundingStatus.PARTIALLY_SUPPORTED
+            else:
+                status = GroundingStatus.UNSUPPORTED
+
+            # Map to InformationNeed if provided
+            matched_need_id: Optional[str] = None
+            if information_needs:
+                for need in information_needs:
+                    if any(_norm(ent) in _norm(statement_clean) for ent in need.required_entities):
+                        matched_need_id = need.id
+                        break
+
+            claim = Claim(
                 statement=statement_clean,
-                grounding_status=GroundingStatus.SUPPORTED,
+                grounding_status=status,
+                supporting_fact_ids=matched_fact_ids,
+                supporting_relationship_ids=matched_rel_ids,
                 evidence_refs=matched_evidence_refs,
                 source_refs=[r.model_dump() for r in matched_evidence_refs],
+                information_need_id=matched_need_id,
+                metadata={"overlap_ratio": round(overlap_ratio, 3), "overlap_terms": list(overlap_terms)},
             )
 
-        # Check term overlap with evidence
-        ev_all_terms = _significant_terms(evidence_text_combined)
-        overlap_terms = stmt_terms & ev_all_terms
-        overlap_ratio = len(overlap_terms) / len(stmt_terms) if stmt_terms else 0.0
-
-        # Check multi-clause / compound statements (e.g. "X and Y")
-        clauses = re.split(r"\s+and\s+|\s+but\s+|;\s*", statement_clean)
-        is_compound = len(clauses) > 1 and all(len(c.strip()) > 15 for c in clauses)
-        if is_compound:
-            clause_overlaps = []
-            for c in clauses:
-                c_terms = _significant_terms(c)
-                c_ratio = len(c_terms & ev_all_terms) / len(c_terms) if c_terms else 0.0
-                clause_overlaps.append(c_ratio)
-            
-            # If one clause is supported and another is not -> PARTIALLY_SUPPORTED
-            if any(r >= 0.25 for r in clause_overlaps) and any(r < 0.20 for r in clause_overlaps):
-                return Claim(
-                    statement=statement_clean,
-                    grounding_status=GroundingStatus.PARTIALLY_SUPPORTED,
-                    supporting_fact_ids=matched_fact_ids,
-                    evidence_refs=matched_evidence_refs,
-                    source_refs=[r.model_dump() for r in matched_evidence_refs],
-                    metadata={"clause_overlaps": clause_overlaps, "overlap_ratio": round(overlap_ratio, 3)},
-                )
-
-        # ── 4. Grounding Status Decision ─────────────────────────────────────
-        if not ev_all_terms:
-            status = GroundingStatus.INSUFFICIENT_EVIDENCE
-        elif overlap_ratio >= 0.25:
-            status = GroundingStatus.SUPPORTED
-        elif overlap_ratio >= 0.15:
-            status = GroundingStatus.PARTIALLY_SUPPORTED
+        if workspace and hasattr(workspace, "evaluate_claim_quality"):
+            workspace.evaluate_claim_quality(claim, evidence_list)
         else:
-            status = GroundingStatus.UNSUPPORTED
+            # Fallback quality calculation
+            if claim.grounding_status == GroundingStatus.CONFLICTING_EVIDENCE:
+                s_level = SupportLevel.CONFLICTING
+            elif claim.grounding_status == GroundingStatus.UNSUPPORTED:
+                s_level = SupportLevel.UNVERIFIED
+            elif claim.grounding_status == GroundingStatus.PARTIALLY_SUPPORTED:
+                s_level = SupportLevel.PARTIALLY_SUPPORTED
+            elif claim.grounding_status == GroundingStatus.INSUFFICIENT_EVIDENCE:
+                s_level = SupportLevel.INSUFFICIENT
+            elif claim.grounding_status == GroundingStatus.SUPPORTED:
+                s_level = SupportLevel.WELL_SUPPORTED
+            else:
+                s_level = SupportLevel.UNCERTAIN
 
-        # Map to InformationNeed if provided
-        matched_need_id: Optional[str] = None
-        if information_needs:
-            for need in information_needs:
-                if any(_norm(ent) in _norm(statement_clean) for ent in need.required_entities):
-                    matched_need_id = need.id
-                    break
+            claim.support_level = s_level
+            claim.quality = KnowledgeQuality(
+                support_level=s_level,
+                evidence_coverage={"claim_grounded": s_level == SupportLevel.WELL_SUPPORTED},
+                consistency="CONFLICTING" if s_level == SupportLevel.CONFLICTING else "CONSISTENT",
+                source_count=len({r.page_title for r in claim.evidence_refs if r.page_title}),
+                evidence_agreement_count=len(claim.evidence_refs),
+                status="EVALUATED",
+            )
 
-        return Claim(
-            statement=statement_clean,
-            grounding_status=status,
-            supporting_fact_ids=matched_fact_ids,
-            supporting_relationship_ids=matched_rel_ids,
-            evidence_refs=matched_evidence_refs,
-            source_refs=[r.model_dump() for r in matched_evidence_refs],
-            information_need_id=matched_need_id,
-            metadata={"overlap_ratio": round(overlap_ratio, 3), "overlap_terms": list(overlap_terms)},
-        )
+        return claim
 
     def ground_answer(
         self,

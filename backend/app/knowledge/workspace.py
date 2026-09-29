@@ -9,8 +9,9 @@ import unicodedata
 from typing import Any, Dict, List, Optional, Set
 
 from app.knowledge.models import (
-    Claim, Contradiction, Entity, EntityType, EvidenceReference, Fact,
-    FactStatus, Relationship,
+    Claim, Conflict, ConflictStatus, Contradiction, Entity, EntityType,
+    EvidenceReference, Fact, FactStatus, GroundingStatus, KnowledgeQuality,
+    Relationship, SupportLevel,
 )
 
 
@@ -23,10 +24,30 @@ def _norm(text: str) -> str:
     return re.sub(r"\s+", " ", ascii_str).strip().lower()
 
 
+_STOP_WORDS = {
+    "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "do", "does", "did", "will", "would", "could",
+    "should", "may", "might", "must", "shall", "can", "to", "of", "in",
+    "on", "at", "by", "for", "with", "from", "as", "this", "that", "these",
+    "those", "it", "its", "they", "them", "their", "he", "she", "his",
+    "her", "we", "us", "our", "you", "your", "i", "me", "my", "and",
+    "but", "or", "not", "also", "so", "than", "more", "most", "very",
+    "such", "about", "which", "who", "what", "when", "where", "how",
+}
+
+
+def _significant_terms(text: str) -> Set[str]:
+    """Extract significant terms from a string for semantic matching."""
+    if not text:
+        return set()
+    tokens = re.findall(r"\b[a-zA-Z0-9_\-\.]+\b", text.lower())
+    return {t for t in tokens if t not in _STOP_WORDS and len(t) > 1}
+
+
 class KnowledgeWorkspace:
     """
     Temporary workspace holding structured knowledge extracted during an agent task.
-    Maintains complete source provenance and prevents unverified or duplicate knowledge.
+    Maintains complete source provenance, tracks epistemic quality, and handles conflict lifecycle.
     """
 
     def __init__(self, run_id: Optional[str] = None):
@@ -36,7 +57,9 @@ class KnowledgeWorkspace:
         self.relationships: List[Relationship] = []
         self.claims: List[Claim] = []
         self.contradictions: List[Contradiction] = []
+        self.conflicts: List[Conflict] = []
         self.evidence_references: List[EvidenceReference] = []
+        self.quality: Optional[KnowledgeQuality] = None
 
     def add_entity(
         self,
@@ -112,7 +135,11 @@ class KnowledgeWorkspace:
                 return fact
 
         # 2. Check for conflicting fact (e.g. single-value predicates like birth date, death date)
-        single_value_predicates = {"born", "birth_date", "birth date", "died", "death_date", "death date", "discovered_year"}
+        single_value_predicates = {
+            "born", "birth_date", "birth date", "birth_year", "birth year",
+            "died", "death_date", "death date", "death_year", "death year",
+            "discovered_year", "discovered year",
+        }
         if norm_pred in single_value_predicates:
             for fact in self.facts:
                 if _norm(fact.subject) == norm_subj and _norm(fact.predicate) == norm_pred:
@@ -205,7 +232,7 @@ class KnowledgeWorkspace:
         evidence_ref_b: Optional[EvidenceReference] = None,
         details: str = "",
     ) -> Contradiction:
-        """Record an explicit conflict between evidence sources."""
+        """Record an explicit conflict between evidence sources and track Conflict state."""
         contra = Contradiction(
             topic=topic,
             claim_a=claim_a,
@@ -215,7 +242,264 @@ class KnowledgeWorkspace:
             details=details,
         )
         self.contradictions.append(contra)
+
+        # Mirror into structured Conflict
+        refs = [r for r in [evidence_ref_a, evidence_ref_b] if r]
+        sources = [r.page_title for r in refs if r.page_title]
+        self.add_conflict(
+            topic=topic,
+            conflicting_values=[claim_a, claim_b],
+            evidence_refs=refs,
+            sources=sources,
+            status=ConflictStatus.UNRESOLVED,
+            metadata={"contradiction_id": contra.id, "details": details},
+        )
         return contra
+
+    def add_conflict(
+        self,
+        topic: str,
+        conflicting_values: List[str],
+        evidence_refs: Optional[List[EvidenceReference]] = None,
+        sources: Optional[List[str]] = None,
+        fact_or_claim_id: Optional[str] = None,
+        status: ConflictStatus = ConflictStatus.UNRESOLVED,
+        resolution_notes: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Conflict:
+        """Record or update a structured Conflict in the workspace."""
+        norm_t = _norm(topic)
+        for c in self.conflicts:
+            if _norm(c.topic) == norm_t:
+                for val in conflicting_values:
+                    if val not in c.conflicting_values:
+                        c.conflicting_values.append(val)
+                if evidence_refs:
+                    for ref in evidence_refs:
+                        if not any(r.evidence_id == ref.evidence_id for r in c.evidence_refs):
+                            c.evidence_refs.append(ref)
+                if sources:
+                    for s in sources:
+                        if s not in c.sources:
+                            c.sources.append(s)
+                return c
+
+        sources_list = list(sources or [])
+        if evidence_refs:
+            for ref in evidence_refs:
+                if ref.page_title and ref.page_title not in sources_list:
+                    sources_list.append(ref.page_title)
+
+        conflict = Conflict(
+            topic=topic,
+            fact_or_claim_id=fact_or_claim_id,
+            conflicting_values=conflicting_values,
+            evidence_refs=evidence_refs or [],
+            sources=sources_list,
+            status=status,
+            resolution_notes=resolution_notes,
+            metadata=metadata or {},
+        )
+        self.conflicts.append(conflict)
+        return conflict
+
+    def resolve_conflict(self, conflict_id: str, resolution_notes: str = "") -> bool:
+        """Mark a conflict as resolved with resolution explanation."""
+        for c in self.conflicts:
+            if c.id == conflict_id or _norm(c.topic) == _norm(conflict_id):
+                c.status = ConflictStatus.RESOLVED
+                c.resolution_notes = resolution_notes
+                return True
+        return False
+
+    def mark_persistent_conflict(self, conflict_id: str, notes: Optional[str] = None) -> bool:
+        """Mark a conflict as persistent when repair budget is exhausted without resolution."""
+        for c in self.conflicts:
+            if c.id == conflict_id or _norm(c.topic) == _norm(conflict_id):
+                c.status = ConflictStatus.PERSISTENT_CONFLICT
+                if notes:
+                    c.resolution_notes = notes
+                return True
+        return False
+
+    def has_unresolved_conflicts(self) -> bool:
+        """Check if any active unresolved conflicts exist."""
+        return any(c.status == ConflictStatus.UNRESOLVED for c in self.conflicts)
+
+    def evaluate_claim_quality(
+        self,
+        claim: Claim,
+        evidence_items: Optional[List[Any]] = None,
+    ) -> KnowledgeQuality:
+        """
+        Evaluate epistemic quality, support level, consistency, and agreement for an individual claim.
+        """
+        stmt_clean = claim.statement.strip()
+        stmt_terms = _significant_terms(stmt_clean)
+
+        # 1. Check for conflicting state
+        matching_conflicts: List[Conflict] = []
+        is_conflicting = False
+        if claim.grounding_status == GroundingStatus.CONFLICTING_EVIDENCE or claim.status == "CONFLICTING":
+            is_conflicting = True
+
+        for c in self.conflicts:
+            if c.status == ConflictStatus.UNRESOLVED:
+                topic_terms = _significant_terms(c.topic)
+                first_word = _norm(c.topic.split()[0]) if c.topic else ""
+                if topic_terms and (topic_terms.issubset(stmt_terms) or (first_word and first_word in stmt_terms)):
+                    is_conflicting = True
+                    matching_conflicts.append(c)
+
+        for contra in self.contradictions:
+            topic_terms = _significant_terms(contra.topic)
+            first_word = _norm(contra.topic.split()[0]) if contra.topic else ""
+            if topic_terms and (topic_terms.issubset(stmt_terms) or (first_word and first_word in stmt_terms)):
+                is_conflicting = True
+
+        # Extract sources
+        distinct_sources: Set[str] = set()
+        for ref in claim.evidence_refs:
+            if ref.page_title:
+                distinct_sources.add(ref.page_title)
+        for sref in claim.source_refs:
+            if isinstance(sref, dict) and sref.get("page_title"):
+                distinct_sources.add(sref["page_title"])
+
+        # Determine support level
+        if is_conflicting:
+            support_level = SupportLevel.CONFLICTING
+            consistency = "CONFLICTING"
+        elif claim.grounding_status == GroundingStatus.UNSUPPORTED:
+            support_level = SupportLevel.UNVERIFIED
+            consistency = "UNKNOWN"
+        elif claim.grounding_status == GroundingStatus.PARTIALLY_SUPPORTED:
+            support_level = SupportLevel.PARTIALLY_SUPPORTED
+            consistency = "CONSISTENT"
+        elif claim.grounding_status == GroundingStatus.INSUFFICIENT_EVIDENCE:
+            support_level = SupportLevel.INSUFFICIENT
+            consistency = "UNKNOWN"
+        elif claim.grounding_status == GroundingStatus.SUPPORTED:
+            support_level = SupportLevel.WELL_SUPPORTED
+            consistency = "CONSISTENT"
+        else:
+            support_level = SupportLevel.UNCERTAIN
+            consistency = "UNKNOWN"
+
+        # Evidence agreement count: number of distinct evidence refs supporting the claim
+        agreement_count = max(len(claim.evidence_refs), len(distinct_sources))
+
+        # Temporal context extraction
+        temporal_match = re.search(r"\b(in\s+)?(1\d{3}|20\d{2})\b", stmt_clean, re.IGNORECASE)
+        temporal_context = temporal_match.group(0) if temporal_match else claim.temporal_scope
+
+        quality = KnowledgeQuality(
+            support_level=support_level,
+            evidence_coverage={"claim_grounded": support_level == SupportLevel.WELL_SUPPORTED},
+            consistency=consistency,
+            source_count=len(distinct_sources),
+            evidence_agreement_count=agreement_count,
+            unresolved_items=[c.topic for c in matching_conflicts],
+            temporal_context=temporal_context,
+            is_fresh=True,
+            conflicts=matching_conflicts,
+            status="EVALUATED",
+        )
+
+        claim.quality = quality
+        claim.support_level = support_level
+        if temporal_context and not claim.temporal_scope:
+            claim.temporal_scope = temporal_context
+
+        return quality
+
+    def evaluate_workspace_quality(
+        self,
+        information_needs: Optional[List[Any]] = None,
+        evidence_items: Optional[List[Any]] = None,
+    ) -> KnowledgeQuality:
+        """
+        Evaluate overall knowledge quality across all information needs and workspace claims.
+        """
+        needs_list = information_needs or []
+        evidence_list = evidence_items or []
+
+        # Evaluate individual claims
+        for claim in self.claims:
+            self.evaluate_claim_quality(claim, evidence_list)
+
+        # Check unresolved conflicts
+        unresolved_confs = [c for c in self.conflicts if c.status == ConflictStatus.UNRESOLVED]
+        has_conflicts = len(unresolved_confs) > 0 or len(self.contradictions) > 0
+
+        # Compute information needs coverage
+        satisfied_needs = 0
+        unresolved_needs: List[str] = []
+        for n in needs_list:
+            n_status = getattr(n, "status", None)
+            status_val = n_status.value if hasattr(n_status, "value") else str(n_status)
+            if status_val == "SATISFIED":
+                satisfied_needs += 1
+            else:
+                unresolved_needs.append(getattr(n, "question", str(n)))
+
+        total_needs = len(needs_list)
+        coverage_dict = {
+            "total_needs": total_needs,
+            "satisfied_needs": satisfied_needs,
+            "unresolved_needs_count": len(unresolved_needs),
+            "coverage_ratio": (satisfied_needs / total_needs) if total_needs > 0 else 1.0,
+        }
+
+        # Count distinct sources across evidence and facts
+        distinct_sources: Set[str] = set()
+        for ev in evidence_list:
+            pt = getattr(ev, "page_title", None)
+            if pt:
+                distinct_sources.add(pt)
+        for f in self.facts:
+            for ref in f.evidence_refs:
+                if ref.page_title:
+                    distinct_sources.add(ref.page_title)
+
+        # Determine overall support level
+        if has_conflicts:
+            overall_support = SupportLevel.CONFLICTING
+            consistency = "CONFLICTING"
+        elif total_needs > 0 and satisfied_needs == 0 and not evidence_list and not self.facts:
+            overall_support = SupportLevel.INSUFFICIENT
+            consistency = "UNKNOWN"
+        elif total_needs > 0 and satisfied_needs < total_needs:
+            overall_support = SupportLevel.PARTIALLY_SUPPORTED
+            consistency = "CONSISTENT"
+        elif any(c.support_level == SupportLevel.PARTIALLY_SUPPORTED for c in self.claims):
+            overall_support = SupportLevel.PARTIALLY_SUPPORTED
+            consistency = "CONSISTENT"
+        elif any(c.support_level == SupportLevel.UNVERIFIED for c in self.claims):
+            overall_support = SupportLevel.UNVERIFIED
+            consistency = "UNKNOWN"
+        elif self.facts or any(c.support_level == SupportLevel.WELL_SUPPORTED for c in self.claims) or evidence_list:
+            overall_support = SupportLevel.WELL_SUPPORTED
+            consistency = "CONSISTENT"
+        else:
+            overall_support = SupportLevel.UNCERTAIN
+            consistency = "UNKNOWN"
+
+        total_agreement = sum(c.quality.evidence_agreement_count for c in self.claims if c.quality)
+
+        quality = KnowledgeQuality(
+            support_level=overall_support,
+            evidence_coverage=coverage_dict,
+            consistency=consistency,
+            source_count=len(distinct_sources),
+            evidence_agreement_count=total_agreement,
+            unresolved_items=unresolved_needs + [c.topic for c in unresolved_confs],
+            conflicts=unresolved_confs,
+            status="EVALUATED",
+        )
+
+        self.quality = quality
+        return quality
 
     def find_entities(self, query: str = "") -> List[Entity]:
         """Search entities by canonical name or alias."""
@@ -300,7 +584,10 @@ class KnowledgeWorkspace:
             "supported_claims": supported_count,
             "unsupported_claims": unsupported_count,
             "contradiction_count": len(self.contradictions),
+            "conflict_count": len(self.conflicts),
+            "unresolved_conflicts": len([c for c in self.conflicts if c.status == ConflictStatus.UNRESOLVED]),
             "entities": [e.canonical_name for e in self.entities.values()],
             "contradictions": [c.details for c in self.contradictions],
+            "quality": self.quality.model_dump() if self.quality else None,
         }
 

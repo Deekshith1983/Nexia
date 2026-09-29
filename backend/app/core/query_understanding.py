@@ -1,11 +1,72 @@
 import json
 import logging
 import re
-from typing import Dict, Optional, Tuple
+import unicodedata
+from typing import Dict, List, Optional, Tuple
 from pydantic import BaseModel, Field, ValidationError
 from app.core.llm_interface import BaseLanguageModel
 
 logger = logging.getLogger("nexia.qu")
+
+
+# ── Topic / entity extraction helpers ─────────────────────────────────────────
+
+# Filler phrase prefixes that should be stripped before using the entity as a
+# Wikipedia search term.  Ordered from longest to shortest to avoid partial matches.
+_FILLER_PREFIXES: List[str] = [
+    r"can\s+you\s+tell\s+me\s+about",
+    r"tell\s+me\s+(?:all\s+)?about",
+    r"tell\s+me\s+more\s+about",
+    r"give\s+me\s+(?:a\s+)?(?:brief\s+)?(?:summary|overview|info(?:rmation)?)\s+(?:on|about|of)",
+    r"what\s+(?:do|did)\s+you\s+know\s+about",
+    r"i\s+want\s+to\s+know\s+about",
+    r"who\s+(?:is|was|were)",
+    r"what\s+(?:is|are|was|were|'s)",
+    r"explain\s+(?:(?:how|why|what)\s+)?",
+    r"describe",
+    r"define",
+    r"tell\s+me\s+the\s+history\s+of",
+    r"the\s+(?:great|famous|legendary|historic(?:al)?|ancient|powerful|brilliant|renowned)\s+(?:king|emperor|warrior|leader|president|prime\s+minister|scientist|philosopher|general|admiral)?\s*",
+    r"the\s+history\s+of",
+    r"history\s+of",
+    r"information\s+(?:on|about|regarding)",
+    r"info\s+(?:on|about|regarding)",
+    r"about",
+]
+
+_FILLER_PREFIX_RE = re.compile(
+    r"^(?:" + r"|".join(_FILLER_PREFIXES) + r")\s*",
+    re.IGNORECASE,
+)
+
+_FILLER_SUFFIX_RE = re.compile(
+    r"\s+(?:please|now|for\s+me|if\s+you\s+can|if\s+possible)[.!?]*$",
+    re.IGNORECASE,
+)
+
+
+def clean_entity_for_search(entity: str) -> str:
+    """
+    Strip filler phrases from an entity string so it can be used directly as a
+    Wikipedia article title or search query.
+
+    Examples:
+        "tell me about Bhagat Singh"  -> "Bhagat Singh"
+        "the great king Ashoka"       -> "Ashoka"
+        "who is Narendra Modi"        -> "Narendra Modi"
+        "Ramayana"                    -> "Ramayana"  (unchanged)
+    """
+    text = entity.strip().rstrip("?.!")
+    # Strip leading filler phrases iteratively (handles nested cases)
+    prev = None
+    while prev != text:
+        prev = text
+        text = _FILLER_PREFIX_RE.sub("", text).strip()
+    # Strip trailing filler
+    text = _FILLER_SUFFIX_RE.sub("", text).strip()
+    # Final safety strip of leading articles
+    text = re.sub(r"^(?:the|a|an)\s+", "", text, flags=re.IGNORECASE).strip()
+    return text if text else entity.strip()
 
 
 class IntentCategory:
@@ -187,6 +248,9 @@ class QueryAnalyzer:
             if m:
                 raw_entity = m.group(entity_group) if entity_group is not None else None
                 entity = _clean_entity(raw_entity) if raw_entity else None
+                # Phase 3: strip any residual filler phrases so entity is Wikipedia-ready
+                if entity:
+                    entity = clean_entity_for_search(entity)
                 return QueryUnderstanding(
                     original_query=stripped,
                     intent=intent,
@@ -195,6 +259,7 @@ class QueryAnalyzer:
                     deterministic=True,
                     metadata={"fast_path": "knowledge", "matched_pattern": pattern.pattern[:40]},
                 )
+
 
         return None  # No deterministic classification possible — use LLM
 

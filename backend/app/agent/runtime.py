@@ -40,7 +40,8 @@ logger = logging.getLogger("nexia.agent.runtime")
 from app.memory.commands import memory_command_parser
 from app.memory.manager import memory_manager
 from app.sessions.commands import session_command_parser, SessionCommandType
-from app.sessions.manager import research_session_manager
+from app.personalization.manager import personalization_manager
+from app.optimization import telemetry_tracker, profile_classifier, ComplexityLevel
 
 # ── Capability selection mapping ──────────────────────────────────────────────
 # Maps ResponseMode values to registered capability IDs.
@@ -52,9 +53,45 @@ _CAPABILITY_MAP: dict = {
 }
 
 
+# ── Phase 4: Personal / Memory-recall routing guard ────────────────────────
+
+import re as _re
+
+_PERSONAL_RECALL_RE = _re.compile(
+    r"^\s*(?:"
+    # "do you remember my [name/...]" / "remember me" / "remember who I am"
+    r"(?:do\s+you\s+)?(?:remember|recall)\s+(?:my\b.*|me\b|who\s+i\s+am|what\s+i(?:'ve|\s+have)?\s+told.*)|"
+    # "what is my name" / "what's my [X]"
+    r"what(?:'s|\s+is)\s+my\b.*|"
+    # "who am I"
+    r"who\s+am\s+i|"
+    # "what did I tell you"
+    r"what\s+did\s+i\s+tell\s+you.*|"
+    # "what do you know about me"
+    r"what\s+do\s+you\s+know\s+about\s+me.*|"
+    # "tell me what you know about me" / "tell me something about me"
+    r"tell\s+me\s+(?:what\s+you\s+know|something)\s+about\s+me.*|"
+    # "what have I shared with you"
+    r"what\s+have\s+i\s+shared\s+with\s+you.*|"
+    # "have you saved/stored my [info]" / "have you saved anything"
+    r"have\s+you\s+(?:saved|stored|remembered|kept)\s+(?:my\b.*|anything.*)|"
+    # "do you have / know my [X]" / "do you know any info about me"
+    r"do\s+you\s+(?:have|know)\s+(?:my\b.*|any\s+info(?:rmation)?\s+about\s+me.*)"
+    r")[?!.\s]*$",
+    _re.IGNORECASE,
+)
+
+
+
+def _is_personal_recall_query(text: str) -> bool:
+    """Return True if query is clearly asking Nexia to recall personal/user information."""
+    return bool(_PERSONAL_RECALL_RE.match(text))
+
+
 def _mode_to_capability(response_mode: str) -> str:
     """Map a ResponseMode string to a capability ID. Defaults to conversation."""
     return _CAPABILITY_MAP.get(response_mode, "conversation")
+
 
 
 class NexiaAgentRuntime:
@@ -97,6 +134,7 @@ class NexiaAgentRuntime:
         """
         run_id = str(uuid.uuid4())
         t_start = time.monotonic()
+        telemetry_tracker.start_request(run_id)
 
         # ── 1. Conversation state ──────────────────────────────────────────────
         state = conversation_manager.get_or_create_conversation(conversation_id)
@@ -116,6 +154,7 @@ class NexiaAgentRuntime:
                     run_id[:8], cid[:8], session_cmd.command_type.value
                 )
                 if session_cmd.command_type == SessionCommandType.RESUME:
+                    from app.sessions.manager import research_session_manager
                     matched, candidates, match_type = research_session_manager.find_matching_session(
                         session_cmd.target_identifier or user_message, user_id=user_id
                     )
@@ -230,8 +269,40 @@ class NexiaAgentRuntime:
                 result = await cap.execute(mem_req)
                 return result, cid
 
+            # ── 1.6. Phase 4 — Personal / memory-recall routing ─────────────────
+            # Intercept queries about the user themselves and answer from memory.
+            # This prevents 'what is my name' from being routed to Wikipedia.
+            if _is_personal_recall_query(user_message):
+                logger.info(
+                    "[RUNTIME] run_id=%s cid=%s Personal recall query \u2014 routing to memory",
+                    run_id[:8], cid[:8],
+                )
+                relevant = memory_manager.get_relevant_memories(
+                    user_message, user_id=user_id, limit=5
+                )
+                if relevant:
+                    mem_lines = "\n".join(f"- {m}" for m in relevant)
+                    reply = f"Here's what I remember about you:\n{mem_lines}"
+                else:
+                    reply = (
+                        "I don't have any personal information stored about you yet. "
+                        "You can tell me things like 'My name is ...' and I'll remember them."
+                    )
+                conversation_manager.add_message(cid, "user", user_message)
+                async def _recall_gen():
+                    conversation_manager.add_message(cid, "assistant", reply)
+                    yield reply
+                telemetry_tracker.end_request(run_id)
+                return CapabilityResult(
+                    status=CapabilityStatus.SUCCESS,
+                    stream=_recall_gen(),
+                    sources=[],
+                    metadata={"routing": "memory_recall"},
+                ), cid
+
             # ── 2. Query Understanding ─────────────────────────────────────────
             t = time.monotonic()
+
             qu = await query_analyzer.analyze(user_message, ollama_service)
             qu_ms = int((time.monotonic() - t) * 1000)
             state.metadata["latest_query_understanding"] = qu.model_dump()
@@ -248,10 +319,29 @@ class NexiaAgentRuntime:
             dec_ms = int((time.monotonic() - t) * 1000)
             state.metadata["latest_response_plan"] = plan.model_dump()
 
-            # ── 4.5. Memory Relevance Search ───────────────────────────────────
+            # ── 4.5. Memory Relevance Search & Personalization Profile ─────────
+            # Check for permanent preference change statements like "From now on, give me detailed explanations"
+            if "from now on" in user_message.lower():
+                extracted = personalization_manager.parse_preference_from_query(user_message)
+                for cat, key, val in extracted:
+                    personalization_manager.store_preference(category=cat, key=key, value=val, user_id=user_id)
+
             relevant_memories = memory_manager.get_relevant_memories(
                 resolution.resolved_query, user_id=user_id, limit=3
             )
+            effective_profile = personalization_manager.resolve_effective_profile(
+                user_message, user_id=user_id, conversation_state=state
+            )
+            state.metadata["latest_effective_profile"] = effective_profile.model_dump()
+
+            # ── 4.8. Computational Profile (Stage 13) ─────────────────────────
+            computational_profile = profile_classifier.classify(
+                qu=qu,
+                resolution=resolution,
+                plan=plan,
+                relevant_memories=relevant_memories,
+            )
+            state.metadata["latest_computational_profile"] = computational_profile.model_dump()
 
             # ── 5. Agent Plan (capability selection) ──────────────────────────
             capability_id = _mode_to_capability(plan.response_mode)
@@ -263,6 +353,8 @@ class NexiaAgentRuntime:
                     "deterministic": qu.deterministic,
                     "entity": qu.entity,
                     "relevant_memory_count": len(relevant_memories),
+                    "effective_profile": effective_profile.model_dump(),
+                    "computational_profile": computational_profile.model_dump(),
                 },
             )
             state.metadata["latest_agent_plan"] = {
@@ -273,9 +365,11 @@ class NexiaAgentRuntime:
 
             logger.debug(
                 "[RUNTIME] run_id=%s qu_ms=%d ctx_ms=%d dec_ms=%d "
-                "mode=%s → capability=%s (memories=%d)",
+                "mode=%s → capability=%s (complexity=%s, memories=%d, profile=%s)",
                 run_id[:8], qu_ms, ctx_ms, dec_ms,
-                plan.response_mode, capability_id, len(relevant_memories),
+                plan.response_mode, capability_id, computational_profile.complexity.value,
+                len(relevant_memories),
+                effective_profile.applied_preferences,
             )
 
             # ── 6. Capability lookup ───────────────────────────────────────────
@@ -285,6 +379,7 @@ class NexiaAgentRuntime:
                     "[RUNTIME] run_id=%s capability not found: %r  registered=%s",
                     run_id[:8], capability_id, capability_registry.list(),
                 )
+                telemetry_tracker.end_request(run_id)
                 return _make_unavailable(
                     f"Capability '{capability_id}' is not registered in Nexia.", run_id
                 ), cid
@@ -303,6 +398,8 @@ class NexiaAgentRuntime:
                     "resolution": resolution.model_dump(),
                     "plan": plan.model_dump(),
                     "relevant_memories": relevant_memories,
+                    "effective_profile": effective_profile.model_dump(),
+                    "computational_profile": computational_profile.model_dump(),
                     "agent_plan": {
                         "response_mode": agent_plan.response_mode,
                         "selected_capability_id": agent_plan.selected_capability_id,
@@ -319,6 +416,8 @@ class NexiaAgentRuntime:
                     "plan": plan,
                     "agent_plan": agent_plan,
                     "relevant_memories": relevant_memories,
+                    "effective_profile": effective_profile,
+                    "computational_profile": computational_profile,
                 },
                 context=exec_ctx,
                 metadata={"run_id": run_id, "user_id": user_id},
@@ -328,21 +427,29 @@ class NexiaAgentRuntime:
             result = await capability.execute(cap_request)
 
             overhead_ms = int((time.monotonic() - t_start) * 1000)
+            perf_metrics = telemetry_tracker.end_request(run_id)
+            if result.metadata is not None:
+                result.metadata["performance_metrics"] = perf_metrics.model_dump()
+                result.metadata["computational_profile"] = computational_profile.model_dump()
+
             logger.info(
-                "[RUNTIME] run_id=%s cid=%s capability=%s status=%s overhead_ms=%d",
+                "[RUNTIME] run_id=%s cid=%s capability=%s status=%s overhead_ms=%d llm_calls=%d wiki_calls=%d",
                 run_id[:8], cid[:8], capability_id,
                 result.status.value, overhead_ms,
+                perf_metrics.llm_call_count, perf_metrics.wikipedia_request_count,
             )
             return result, cid
 
         except asyncio.CancelledError:
             logger.info("[RUNTIME] run_id=%s cid=%s CANCELLED", run_id[:8], cid[:8])
+            telemetry_tracker.end_request(run_id)
             return _make_cancelled(run_id), cid
 
         except Exception as exc:
             logger.exception(
                 "[RUNTIME] run_id=%s UNEXPECTED ERROR: %s", run_id[:8], exc
             )
+            telemetry_tracker.end_request(run_id)
             return _make_failed(str(exc), run_id), cid
 
 

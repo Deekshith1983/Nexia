@@ -9,7 +9,6 @@ from app.agent.capability import Capability, CapabilityRequest, CapabilityResult
 from app.core.conversation_manager import conversation_manager
 from app.core.source_attribution import SourceMetadata
 from app.sessions.commands import SessionCommand, SessionCommandType, session_command_parser
-from app.sessions.manager import research_session_manager
 from app.sessions.models import SessionStatus
 
 logger = logging.getLogger("nexia.agent.session_op")
@@ -36,6 +35,7 @@ class ResearchSessionCapability(Capability):
         cid = ctx.conversation_id
         user_id = ctx.metadata.get("user_id", "default_user")
         t_start = time.monotonic()
+        from app.sessions.manager import research_session_manager
 
         session_cmd: Optional[SessionCommand] = request.input.get("session_cmd")
         if not session_cmd:

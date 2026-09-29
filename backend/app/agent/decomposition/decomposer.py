@@ -198,17 +198,27 @@ class QueryDecomposer:
                         covered_entities.append(ent)
 
                 if len(covered_entities) == len(need.required_entities):
-                    # Check for contradiction preventing false satisfaction
+                    # Check for contradiction / conflict preventing false satisfaction
                     has_contradiction = False
-                    if workspace and workspace.contradictions:
-                        for c in workspace.contradictions:
+                    conflict_details = []
+                    if workspace and (getattr(workspace, "contradictions", None) or getattr(workspace, "conflicts", None)):
+                        for c in getattr(workspace, "contradictions", []):
                             if any(_norm(ent) in _norm(c.topic) for ent in need.required_entities):
                                 has_contradiction = True
+                                conflict_details.append(c.details)
                                 break
+                        for cf in getattr(workspace, "conflicts", []):
+                            if getattr(cf, "status", None) == "UNRESOLVED":
+                                if any(_norm(ent) in _norm(cf.topic) for ent in need.required_entities):
+                                    has_contradiction = True
+                                    conflict_details.append(cf.topic)
+                                    break
 
                     if has_contradiction:
                         need.status = NeedStatus.PARTIALLY_SATISFIED
                         need.metadata["contradiction_detected"] = True
+                        need.metadata["conflict_detected"] = True
+                        need.metadata["conflict_details"] = conflict_details
                     else:
                         need.status = NeedStatus.SATISFIED
                         need.supporting_evidence = list(existing_page_titles)
@@ -218,9 +228,12 @@ class QueryDecomposer:
                     need.status = NeedStatus.IN_PROGRESS
             else:
                 # Need without specific entities (e.g. general factual query)
-                if research_ctx.evidence:
+                has_conflicts = bool(workspace and getattr(workspace, "has_unresolved_conflicts", lambda: False)())
+                if research_ctx.evidence and not has_conflicts:
                     need.status = NeedStatus.SATISFIED
                     need.supporting_evidence = list(existing_page_titles)
+                elif research_ctx.evidence:
+                    need.status = NeedStatus.PARTIALLY_SATISFIED
 
         # ── Adaptive Sub-Need Creation (Bounded) ─────────────────────────────
         # If a high-priority need is satisfied but reveals a missing secondary concept in the query

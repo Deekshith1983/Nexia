@@ -11,7 +11,7 @@ Evaluates:
 import logging
 import re
 import unicodedata
-from typing import List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from app.agent.reflection.models import ReflectionResult, ReflectionStatus
 from app.agent.research.action import ResearchAction, ResearchActionType
@@ -59,6 +59,7 @@ class ReflectionEngine:
         research_ctx: ResearchContext,
         generated_answer: Optional[str] = None,
         validation_result: Optional[ValidationResult] = None,
+        workspace: Optional[Any] = None,
         repair_attempt: int = 0,
         max_repair_attempts: int = 2,
         executed_repair_queries: Optional[Set[str]] = None,
@@ -106,12 +107,49 @@ class ReflectionEngine:
             logger.info(
                 "[REFLECTION] Max repair attempts (%d) reached.", max_repair_attempts
             )
+            # If conflicts exist and cannot be resolved further, mark as persistent
+            if workspace and hasattr(workspace, "conflicts"):
+                for c in workspace.conflicts:
+                    if getattr(c, "status", None) == "UNRESOLVED":
+                        workspace.mark_persistent_conflict(c.id, "Repair budget exhausted without definitive resolution.")
+
             return ReflectionResult(
                 status=ReflectionStatus.UNRECOVERABLE,
                 issue="Answer did not pass validation within allowed repair attempts.",
                 stop_reason="Repair budget exhausted.",
                 metadata={"repair_attempt": repair_attempt},
             )
+
+        # ── 3.5. Conflict Detection & Targeted Resolution (Stage 12) ──────────
+        if workspace and hasattr(workspace, "conflicts") and workspace.conflicts:
+            unresolved_conflicts = [c for c in workspace.conflicts if getattr(c, "status", None) == "UNRESOLVED"]
+            for conf in unresolved_conflicts:
+                conf_topic = conf.topic
+                norm_conf_topic = _norm(conf_topic)
+                if norm_conf_topic and norm_conf_topic not in executed_queries:
+                    logger.info(
+                        "[REFLECTION] Conflict detected on topic %r. Triggering targeted research repair.",
+                        conf_topic
+                    )
+                    return ReflectionResult(
+                        status=ReflectionStatus.NEEDS_RESEARCH_REPAIR,
+                        issue=f"Conflicting evidence detected on topic: '{conf_topic}'",
+                        missing_information=f"Clarifying Wikipedia evidence for conflicting values: {conf.conflicting_values}",
+                        suggested_query=conf_topic,
+                        corrective_action={
+                            "type": ResearchActionType.WIKIPEDIA_SEARCH.value,
+                            "query": conf_topic,
+                            "objective": f"Targeted research to investigate and resolve conflict on: {conf_topic}",
+                        },
+                        metadata={
+                            "repair_attempt": repair_attempt,
+                            "strategy": "conflict_resolution_repair",
+                            "conflict_id": conf.id,
+                        },
+                    )
+                else:
+                    # Query already executed for this conflict without full resolution
+                    workspace.mark_persistent_conflict(conf.id, "Targeted research performed; conflicting accounts persist in Wikipedia.")
 
         # ── 4. Multi-Entity Comparison Gap Detection ──────────────────────────
         if qu.intent == IntentCategory.COMPARISON:
@@ -146,11 +184,9 @@ class ReflectionEngine:
         if validation_result and validation_result.unsupported_claims:
             first_unsupported = validation_result.unsupported_claims[0]
             claim_stmt = first_unsupported.statement
-            # Extract main capitalized terms or subject
             claim_entities = re.findall(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b", claim_stmt)
             target_ent = claim_entities[0] if claim_entities else None
             
-            # Formulate targeted query from statement
             target_query = target_ent or re.sub(r"[^\w\s]", "", claim_stmt[:60]).strip()
             norm_target = _norm(target_query)
             

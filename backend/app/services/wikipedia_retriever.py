@@ -1,11 +1,15 @@
 import logging
 import re
+import time
 import unicodedata
 import urllib.parse
 from typing import Dict, List, Optional, Tuple
 
 import httpx
 from pydantic import BaseModel, Field
+
+from app.optimization.cache import local_cache_manager
+from app.optimization.telemetry import telemetry_tracker
 
 logger = logging.getLogger("nexia.wiki")
 
@@ -254,19 +258,23 @@ class WikipediaRetriever:
         self,
         query: str,
         entity: Optional[str] = None,
+        force_refresh: bool = False,
+        request_id: Optional[str] = None,
     ) -> RetrievalResult:
         """
-        Retrieve Wikipedia evidence for a query.
-
-        Strategy (in priority order):
-          1. Direct title lookup — try entity name variants. Use the first
-             variant that resolves to a real non-disambiguation Wikipedia page.
-          2. Full-text search + entity-aware candidate ranking (fallback).
+        Retrieve Wikipedia evidence for a query with controlled local caching and telemetry.
         """
         cleaned_query = query.strip()
         if not cleaned_query:
             return RetrievalResult(status=RetrievalStatus.NO_RESULTS, query=cleaned_query)
 
+        # ── 0. Check Local Cache ──────────────────────────────────────────────
+        cached_result = local_cache_manager.get_wikipedia(cleaned_query, entity=entity, force_refresh=force_refresh)
+        if cached_result is not None:
+            telemetry_tracker.record_wikipedia_call(request_id, duration_ms=0.5, cached=True)
+            return cached_result
+
+        t_start = time.monotonic()
         headers = {"User-Agent": self.USER_AGENT}
         logger.debug("[WIKI] retrieve  query=%r  entity=%r", cleaned_query, entity)
 
@@ -289,7 +297,7 @@ class WikipediaRetriever:
                                 "[WIKI] direct lookup success  variant=%r -> title=%r",
                                 variant, actual_title,
                             )
-                            return RetrievalResult(
+                            result = RetrievalResult(
                                 status=RetrievalStatus.SUCCESS,
                                 query=cleaned_query,
                                 page_title=actual_title,
@@ -301,6 +309,11 @@ class WikipediaRetriever:
                                     "page_id": direct_data.get("pageid"),
                                 },
                             )
+                            dur_ms = (time.monotonic() - t_start) * 1000.0
+                            telemetry_tracker.record_wikipedia_call(request_id, duration_ms=dur_ms, cached=False)
+                            local_cache_manager.set_wikipedia(cleaned_query, result, entity=entity)
+                            return result
+
                     logger.debug(
                         "[WIKI] all direct lookup variants failed for entity=%r; falling back to search",
                         entity,
@@ -318,6 +331,8 @@ class WikipediaRetriever:
                 search_res = await client.get(self.SEARCH_API_URL, params=search_params)
 
                 if search_res.status_code != 200:
+                    dur_ms = (time.monotonic() - t_start) * 1000.0
+                    telemetry_tracker.record_wikipedia_call(request_id, duration_ms=dur_ms, cached=False)
                     return RetrievalResult(
                         status=RetrievalStatus.FAILED,
                         query=cleaned_query,
@@ -328,6 +343,8 @@ class WikipediaRetriever:
                 search_results = search_data.get("query", {}).get("search", [])
 
                 if not search_results:
+                    dur_ms = (time.monotonic() - t_start) * 1000.0
+                    telemetry_tracker.record_wikipedia_call(request_id, duration_ms=dur_ms, cached=False)
                     return RetrievalResult(status=RetrievalStatus.NO_RESULTS, query=cleaned_query)
 
                 logger.debug(
@@ -340,12 +357,16 @@ class WikipediaRetriever:
                     search_results, entity=entity, query=cleaned_query
                 )
                 if not selected_title:
+                    dur_ms = (time.monotonic() - t_start) * 1000.0
+                    telemetry_tracker.record_wikipedia_call(request_id, duration_ms=dur_ms, cached=False)
                     return RetrievalResult(status=RetrievalStatus.NO_RESULTS, query=cleaned_query)
 
                 logger.debug("[WIKI] search selected title=%r", selected_title)
 
                 summary_data = await self._fetch_summary(client, selected_title)
                 if not summary_data:
+                    dur_ms = (time.monotonic() - t_start) * 1000.0
+                    telemetry_tracker.record_wikipedia_call(request_id, duration_ms=dur_ms, cached=False)
                     return RetrievalResult(
                         status=RetrievalStatus.NO_RESULTS,
                         query=cleaned_query,
@@ -365,7 +386,7 @@ class WikipediaRetriever:
                     actual_title, page_url, len(extract),
                 )
 
-                return RetrievalResult(
+                result = RetrievalResult(
                     status=RetrievalStatus.SUCCESS,
                     query=cleaned_query,
                     page_title=actual_title,
@@ -378,8 +399,14 @@ class WikipediaRetriever:
                         "candidates": [r.get("title") for r in search_results],
                     },
                 )
+                dur_ms = (time.monotonic() - t_start) * 1000.0
+                telemetry_tracker.record_wikipedia_call(request_id, duration_ms=dur_ms, cached=False)
+                local_cache_manager.set_wikipedia(cleaned_query, result, entity=entity)
+                return result
 
         except (httpx.HTTPError, httpx.TimeoutException, Exception) as e:
+            dur_ms = (time.monotonic() - t_start) * 1000.0
+            telemetry_tracker.record_wikipedia_call(request_id, duration_ms=dur_ms, cached=False)
             logger.warning("[WIKI] retrieval failed: %s", e)
             return RetrievalResult(
                 status=RetrievalStatus.FAILED,

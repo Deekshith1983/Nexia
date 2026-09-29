@@ -5,6 +5,7 @@ Provides the application-level interface for creating, loading, persisting, paus
 resuming, completing, cancelling, archiving, and deleting long-horizon research sessions.
 Handles snapshotting and restoring of live ResearchContext and KnowledgeWorkspace state.
 """
+from datetime import datetime, timezone
 import logging
 import re
 import time
@@ -18,8 +19,8 @@ from app.agent.research.finding import Finding
 from app.agent.research.plan import PlanStatus, ResearchPlan
 from app.core.source_attribution import SourceMetadata
 from app.knowledge.models import (
-    Claim, Contradiction, Entity, EntityType, EvidenceReference, Fact, FactStatus,
-    GroundingStatus, Relationship,
+    Claim, Conflict, Contradiction, Entity, EntityType, EvidenceReference, Fact, FactStatus,
+    GroundingStatus, KnowledgeQuality, Relationship,
 )
 from app.knowledge.workspace import KnowledgeWorkspace
 from app.services.wikipedia_navigator import NavigationHistory, NavigationStep
@@ -291,7 +292,9 @@ class ResearchSessionManager:
                 "relationships": [r.model_dump() for r in workspace.relationships],
                 "claims": [c.model_dump() for c in workspace.claims],
                 "contradictions": [ct.model_dump() for ct in workspace.contradictions],
+                "conflicts": [cf.model_dump() for cf in workspace.conflicts],
                 "evidence_references": [er.model_dump() for er in workspace.evidence_references],
+                "quality": workspace.quality.model_dump() if workspace.quality else None,
             }
 
         # 7. Claims and Sources
@@ -459,10 +462,41 @@ class ResearchSessionManager:
                 workspace.claims.append(Claim.model_validate(c_dict))
             for ct_dict in kw_data.get("contradictions", []):
                 workspace.contradictions.append(Contradiction.model_validate(ct_dict))
+            for cf_dict in kw_data.get("conflicts", []):
+                workspace.conflicts.append(Conflict.model_validate(cf_dict))
             for er_dict in kw_data.get("evidence_references", []):
                 workspace.evidence_references.append(EvidenceReference.model_validate(er_dict))
+            if kw_data.get("quality"):
+                workspace.quality = KnowledgeQuality.model_validate(kw_data["quality"])
 
         return research_ctx, workspace
+
+    def evaluate_evidence_freshness(
+        self,
+        query_or_topic: str,
+        evidence_timestamp: Optional[datetime] = None,
+        max_age_days: int = 30,
+    ) -> bool:
+        """
+        Determine if evidence remains sufficiently fresh or if a time-sensitive query
+        requires fresh Wikipedia retrieval.
+        """
+        time_sensitive_keywords = {
+            "current", "currently", "now", "present", "today", "recent", "recently",
+            "leader", "president", "ceo", "prime minister", "status", "latest",
+            "holding office", "incumbent",
+        }
+        query_words = set(re.findall(r"\b\w+\b", query_or_topic.lower()))
+        is_time_sensitive = bool(query_words & time_sensitive_keywords)
+
+        if not is_time_sensitive:
+            return True
+
+        if not evidence_timestamp:
+            return False
+
+        age = datetime.now(timezone.utc) - evidence_timestamp
+        return age.days <= max_age_days
 
 
 research_session_manager = ResearchSessionManager()

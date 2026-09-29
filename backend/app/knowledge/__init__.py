@@ -2,8 +2,9 @@
 Nexia Stage 6 Structured Knowledge Representation & Multi-Hop Reasoning Package.
 """
 from app.knowledge.models import (
-    Claim, Contradiction, Entity, EntityType, EvidenceReference, Fact,
-    FactStatus, GroundingStatus, Relationship,
+    Claim, Conflict, ConflictStatus, Contradiction, Entity, EntityType,
+    EvidenceReference, Fact, FactStatus, GroundingStatus, KnowledgeQuality,
+    Relationship, SupportLevel,
 )
 from app.knowledge.workspace import KnowledgeWorkspace
 from app.knowledge.extractor import KnowledgeExtractor, knowledge_extractor
@@ -16,6 +17,8 @@ from app.knowledge.claims import (
 
 __all__ = [
     "Claim",
+    "Conflict",
+    "ConflictStatus",
     "Contradiction",
     "Entity",
     "EntityType",
@@ -23,7 +26,9 @@ __all__ = [
     "Fact",
     "FactStatus",
     "GroundingStatus",
+    "KnowledgeQuality",
     "Relationship",
+    "SupportLevel",
     "KnowledgeWorkspace",
     "KnowledgeExtractor",
     "knowledge_extractor",

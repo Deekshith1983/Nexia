@@ -28,7 +28,7 @@ class ResearchSessionStore:
 
     def __init__(self, db_path: Optional[str] = None):
         if db_path is None:
-            db_path = "data/research_sessions.db"
+            db_path = settings.sessions_db_path
 
         path_obj = Path(db_path)
         if not path_obj.is_absolute():
