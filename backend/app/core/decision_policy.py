@@ -25,20 +25,29 @@ class DecisionPolicy:
         qu: QueryUnderstanding,
         resolution: ContextResolution,
     ) -> ResponsePlan:
-        # Determine whether factual retrieval and validation pipeline are required
-        is_knowledge = (
-            qu.intent in [
-                IntentCategory.FACTUAL_LOOKUP,
-                IntentCategory.ENTITY_INFORMATION,
-                IntentCategory.EXPLANATION,
-                IntentCategory.COMPARISON,
-                IntentCategory.DEFINITION,
-                IntentCategory.SUMMARIZATION,
-            ]
-            or bool(qu.entity)
-            or bool(resolution.resolved_entity)
-            or resolution.resolution_status == ResolutionStatus.RESOLVED
-        )
+        # Route-first check: smalltalk, user_statement, memory_recall, about_bot, out_of_scope NEVER require Wikipedia retrieval
+        if qu.route in ("smalltalk", "user_statement", "memory_recall", "about_bot", "out_of_scope"):
+            is_knowledge = False
+        else:
+            is_knowledge = (
+                qu.route == "knowledge"
+                or qu.intent in [
+                    IntentCategory.FACTUAL_LOOKUP,
+                    IntentCategory.ENTITY_INFORMATION,
+                    IntentCategory.EXPLANATION,
+                    IntentCategory.COMPARISON,
+                    IntentCategory.DEFINITION,
+                    IntentCategory.SUMMARIZATION,
+                    "overview",
+                    "attribute",
+                    "event_fact",
+                    "verification",
+                    "list",
+                ]
+                or bool(qu.entity)
+                or bool(resolution.resolved_entity)
+                or resolution.resolution_status == ResolutionStatus.RESOLVED
+            )
 
         if is_knowledge:
             return ResponsePlan(

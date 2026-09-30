@@ -269,10 +269,54 @@ class NexiaAgentRuntime:
                 result = await cap.execute(mem_req)
                 return result, cid
 
-            # ── 1.6. Phase 4 — Personal / memory-recall routing ─────────────────
-            # Intercept queries about the user themselves and answer from memory.
-            # This prevents 'what is my name' from being routed to Wikipedia.
-            if _is_personal_recall_query(user_message):
+            # ── 2. Query Understanding (Route-First) ───────────────────────────
+            t = time.monotonic()
+            qu = await query_analyzer.analyze(user_message, ollama_service)
+            qu_ms = int((time.monotonic() - t) * 1000)
+            state.metadata["latest_query_understanding"] = qu.model_dump()
+
+            # ── 2.1. Out-of-Scope Polite Decline ──────────────────────────────
+            if qu.route == "out_of_scope":
+                decline_msg = (
+                    "I am Nexia, an informational assistant focused on Wikipedia knowledge. "
+                    "I cannot perform mathematical calculations, real-time weather forecasts, or other live external operations."
+                )
+                conversation_manager.add_message(cid, "user", user_message)
+                async def _out_of_scope_gen():
+                    conversation_manager.add_message(cid, "assistant", decline_msg)
+                    yield decline_msg
+                telemetry_tracker.end_request(run_id)
+                return CapabilityResult(
+                    status=CapabilityStatus.SUCCESS,
+                    stream=_out_of_scope_gen(),
+                    sources=[],
+                    metadata={"routing": "out_of_scope"},
+                ), cid
+
+            # ── 2.2. User Statement (Self-introduction / facts) ───────────────
+            if qu.route == "user_statement":
+                m_name = _re.search(r"\b(?:i\s+am|i'm|my\s+name\s+is)\s+([A-Za-z0-9]+)\b", user_message, _re.I)
+                name_val = m_name.group(1).strip() if m_name and m_name.group(1).lower() not in ("a", "an", "the", "here") else None
+                if name_val:
+                    memory_manager.add_memory(f"User's name is {name_val.capitalize()}", user_id=user_id)
+                    reply = f"Nice to meet you, {name_val.capitalize()}! I've remembered your name. How can I assist you with Wikipedia knowledge today?"
+                else:
+                    memory_manager.add_memory(user_message, user_id=user_id)
+                    reply = "Thank you for sharing! I've saved that to memory. How can I help you today?"
+                conversation_manager.add_message(cid, "user", user_message)
+                async def _user_stmt_gen():
+                    conversation_manager.add_message(cid, "assistant", reply)
+                    yield reply
+                telemetry_tracker.end_request(run_id)
+                return CapabilityResult(
+                    status=CapabilityStatus.SUCCESS,
+                    stream=_user_stmt_gen(),
+                    sources=[],
+                    metadata={"routing": "user_statement"},
+                ), cid
+
+            # ── 2.3. Personal Recall / Memory Query ───────────────────────────
+            if qu.route == "memory_recall" or _is_personal_recall_query(user_message):
                 logger.info(
                     "[RUNTIME] run_id=%s cid=%s Personal recall query \u2014 routing to memory",
                     run_id[:8], cid[:8],
@@ -299,13 +343,6 @@ class NexiaAgentRuntime:
                     sources=[],
                     metadata={"routing": "memory_recall"},
                 ), cid
-
-            # ── 2. Query Understanding ─────────────────────────────────────────
-            t = time.monotonic()
-
-            qu = await query_analyzer.analyze(user_message, ollama_service)
-            qu_ms = int((time.monotonic() - t) * 1000)
-            state.metadata["latest_query_understanding"] = qu.model_dump()
 
             # ── 3. Context & Coreference Resolution ───────────────────────────
             t = time.monotonic()

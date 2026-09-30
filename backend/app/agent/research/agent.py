@@ -315,9 +315,9 @@ class WikipediaResearchAgent:
             )
             context.completion_status = CompletionStatus.INTERNAL_ERROR
         elif context.completion_status == CompletionStatus.MORE_INFORMATION_NEEDED:
-            if context.evidence:
-                context.completion_status = CompletionStatus.SUFFICIENT
-            else:
+            # Re-evaluate: is accumulated evidence actually sufficient?
+            self._evaluate_completion(context, qu)
+            if context.completion_status == CompletionStatus.MORE_INFORMATION_NEEDED:
                 context.completion_status = CompletionStatus.INSUFFICIENT_KNOWLEDGE
 
         total_ms = int((time.monotonic() - t_start) * 1000)
@@ -369,7 +369,44 @@ class WikipediaResearchAgent:
             objective="Retrieve Wikipedia evidence for the main subject",
             query=resolved_query,
             entity=primary_entity,
+            metadata={
+                "attribute": qu.attribute,
+                "constraints": qu.constraints,
+                "intent": qu.intent.value if hasattr(qu.intent, "value") else str(qu.intent),
+            },
         ))
+
+        # Negative/exclusion query: detect target group and subject
+        lower_q = resolved_query.lower()
+        if (qu.answer_contract and getattr(qu.answer_contract, "negative_aspect", False)) or re.search(r"\bwhy\s+(?:was|is|did)\s+.+?\s+not\s+", lower_q):
+            neg_match = re.search(r"(?i)why\s+(?:was|is|did)\s+(.+?)\s+not\s+(?:considered|an?\s+incarnation|a\s+reincarnation|regarded|treated|part of|included in)(?:\s+as)?\s*(.+?)(?:\s*\?|\s*$)", resolved_query)
+            if neg_match:
+                s1 = _clean_entity_phrase(neg_match.group(1))
+                s2 = _clean_entity_phrase(neg_match.group(2))
+                s2 = re.sub(r"^(?:as|of|an?|the|either)\s+", "", s2, flags=re.IGNORECASE).strip()
+                if s1 and s2:
+                    actions = [
+                        ResearchAction(
+                            action_id=_new_action_id(),
+                            action_type=ResearchActionType.WIKIPEDIA_RETRIEVE,
+                            objective=f"Retrieve Wikipedia evidence for {s1}",
+                            query=s1,
+                            entity=s1,
+                        ),
+                        ResearchAction(
+                            action_id=_new_action_id(),
+                            action_type=ResearchActionType.WIKIPEDIA_RETRIEVE,
+                            objective=f"Retrieve Wikipedia evidence for {s2}",
+                            query=s2,
+                            entity=s2,
+                        ),
+                    ]
+                    return ResearchPlan(
+                        objective=resolved_query,
+                        actions=actions,
+                        completion_criteria="Retrieve evidence for both subjects to evaluate negative relation",
+                        metadata={"intent": qu.intent, "negative_query": True, "initial_action_count": len(actions)},
+                    )
 
         # Comparison: detect additional entities and add parallel actions
         if qu.intent == IntentCategory.COMPARISON:
@@ -498,6 +535,10 @@ class WikipediaResearchAgent:
                 result = await wikipedia_retriever.retrieve(
                     query=action.query,
                     entity=action.entity,
+                    attribute=action.metadata.get("attribute"),
+                    constraints=action.metadata.get("constraints"),
+                    intent=action.metadata.get("intent"),
+                    request_id=context.request_id,
                 )
             action.result = result
 
@@ -583,6 +624,61 @@ class WikipediaResearchAgent:
                 context.completion_status = CompletionStatus.MORE_INFORMATION_NEEDED
             return
 
+        # Check relevance: At least one evidence item MUST be relevant to the query/entity
+        from app.services.wikipedia_retriever import is_evidence_relevant
+        from app.core.query_understanding import AnswerType
+
+        relevant_evidence = [
+            e for e in context.evidence
+            if is_evidence_relevant(e.page_title, e.content, context.resolved_request, qu.entity)
+        ]
+        if not relevant_evidence:
+            logger.warning("[RESEARCH] No retrieved evidence passed relevance gating for %r", context.resolved_request)
+            if actions_used >= MAX_ACTIONS:
+                context.completion_status = CompletionStatus.INSUFFICIENT_KNOWLEDGE
+            else:
+                context.completion_status = CompletionStatus.MORE_INFORMATION_NEEDED
+            return
+
+        # Check Answer Contract satisfaction for LIST requests
+        if qu.answer_contract and qu.answer_contract.answer_type == AnswerType.LIST:
+            # A LIST request requires multiple items or a section containing a list/rulers
+            has_list_evidence = any(
+                bool(
+                    re.search(r"(?:\n\s*[-*•]|\b(?:rulers?|kings?|monarchs?|emperors?|dynasty|succession|list\s+of)\b)", e.content, re.IGNORECASE)
+                    or e.metadata.get("section_title")
+                )
+                for e in relevant_evidence
+            )
+            if not has_list_evidence:
+                if actions_used < MAX_ACTIONS:
+                    logger.info("[RESEARCH] LIST contract requires section navigation for rulers/items.")
+                    context.completion_status = CompletionStatus.MORE_INFORMATION_NEEDED
+                else:
+                    logger.info("[RESEARCH] LIST contract not satisfied within action budget -> INSUFFICIENT_KNOWLEDGE.")
+                    context.completion_status = CompletionStatus.INSUFFICIENT_KNOWLEDGE
+                return
+
+        # Check temporal constraint satisfaction:
+        # e.g. "after Tipu Sultan" cannot be satisfied solely by Tipu Sultan's own biography
+        if qu.constraints and "temporal" in qu.constraints:
+            temp_str = str(qu.constraints["temporal"]).lower()
+            if "after" in temp_str:
+                after_name = re.sub(r"(?i)\bafter\s+", "", temp_str).strip()
+                is_solely_boundary = all(
+                    after_name in _norm(e.page_title) for e in relevant_evidence
+                ) and not any(
+                    re.search(r"\b(?:succeeded\s+by|after\s+(?:the\s+death|his\s+death|1799)|restored|later\s+rulers|subsequent)\b", e.content, re.IGNORECASE)
+                    for e in relevant_evidence
+                )
+                if is_solely_boundary:
+                    logger.info("[RESEARCH] Evidence covers boundary %r but not what followed.", after_name)
+                    if actions_used < MAX_ACTIONS:
+                        context.completion_status = CompletionStatus.MORE_INFORMATION_NEEDED
+                    else:
+                        context.completion_status = CompletionStatus.INSUFFICIENT_KNOWLEDGE
+                    return
+
         # Count distinct planned entities (excluding None)
         planned_entities = [
             _norm(a.entity) for a in (context.plan.actions if context.plan else [])
@@ -667,16 +763,44 @@ class WikipediaResearchAgent:
         cover the query's informational needs.
 
         Strategy (deterministic, no LLM):
-          1. Look for named concepts in the query that aren't in retrieved evidence
-          2. Check for "X's Y theory" / "theory of Y" patterns
-          3. Only create a follow-up if the concept appears undercovered
-
-        Returns None if no productive follow-up can be identified.
+          1. Check for LIST contract needing section retrieval (e.g. Rulers of Vijayanagara)
+          2. Look for named concepts in the query that aren't in retrieved evidence
+          3. Check for "X's Y theory" / "theory of Y" patterns
         """
         evidence_text = " ".join(e.content for e in context.evidence).lower()
         retrieved_pages = {_norm(e.page_title) for e in context.evidence}
         original = context.original_request
         resolved = context.resolved_request
+
+        # ── Pattern 0: LIST contract section navigation
+        from app.core.query_understanding import AnswerType
+        if qu.answer_contract and qu.answer_contract.answer_type == AnswerType.LIST and context.evidence:
+            main_ev = context.evidence[0]
+            rel = qu.answer_contract.requested_relation or "Rulers"
+            sec_title = rel.capitalize() if rel else "Rulers"
+            act = ResearchAction(
+                action_id=_new_action_id(),
+                action_type=ResearchActionType.WIKIPEDIA_RETRIEVE_SECTION,
+                objective=f"Retrieve section on {sec_title} from {main_ev.page_title}",
+                entity=main_ev.page_title,
+                section_title=sec_title,
+                query=f"{main_ev.page_title} - {sec_title}",
+            )
+            if not self._is_duplicate(act, context):
+                return act
+
+            # If section retrieval already happened, search for dedicated list article
+            if qu.entity:
+                list_q = f"List of {rel} of {qu.entity}"
+                act_list = ResearchAction(
+                    action_id=_new_action_id(),
+                    action_type=ResearchActionType.WIKIPEDIA_SEARCH,
+                    objective=f"Search for dedicated list of {rel} for {qu.entity}",
+                    query=list_q,
+                    entity=qu.entity,
+                )
+                if not self._is_duplicate(act_list, context):
+                    return act_list
 
         # ── Pattern 1: "X's [concept]" — try to retrieve [concept] separately
         poss_match = re.search(

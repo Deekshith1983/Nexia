@@ -45,6 +45,7 @@ class Settings(BaseSettings):
     memory_db_path: str = os.getenv("MEMORY_DB_PATH", "data/nexia_memory.db")
     sessions_db_path: str = os.getenv("SESSIONS_DB_PATH", "data/research_sessions.db")
     preferences_db_path: str = os.getenv("PREFERENCES_DB_PATH", "data/user_preferences.db")
+    article_db_path: str = os.getenv("ARTICLE_DB_PATH", "data/wikipedia_articles.db")
     baselines_path: str = os.getenv("BASELINES_PATH", "data/evaluation_baselines.json")
 
     # Logging & Telemetry

@@ -80,4 +80,5 @@ def get_persistence_status() -> Dict[str, Any]:
         "memory_db": verify_sqlite_health(settings.memory_db_path),
         "sessions_db": verify_sqlite_health(settings.sessions_db_path),
         "preferences_db": verify_sqlite_health(settings.preferences_db_path),
+        "article_db": verify_sqlite_health(settings.article_db_path),
     }

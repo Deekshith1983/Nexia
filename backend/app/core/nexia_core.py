@@ -183,9 +183,11 @@ class NexiaCore:
                         and self.grounded_generator.has_sufficient_evidence(gen_input)
                         and accumulated_text != INSUFFICIENT_EVIDENCE_RESPONSE
                     ):
-                        try:
                             val_res = await self.answer_validator.validate(
-                                accumulated_text, retrieval, self.llm
+                                accumulated_text,
+                                retrieval,
+                                self.llm,
+                                answer_contract=getattr(analysis, "answer_contract", None),
                             )
                             state.metadata["latest_validation_result"] = val_res.model_dump()
                         except Exception as e:
@@ -346,8 +348,12 @@ class NexiaCore:
             and self.grounded_generator.has_sufficient_evidence(gen_input)
             and response_text not in (INSUFFICIENT_EVIDENCE_RESPONSE, UNVERIFIED_ANSWER_RESPONSE, "")
         ):
-            try:
-                val_res = await self.answer_validator.validate(response_text, retrieval, self.llm)
+                val_res = await self.answer_validator.validate(
+                    response_text,
+                    retrieval,
+                    self.llm,
+                    answer_contract=getattr(analysis, "answer_contract", None),
+                )
                 state.metadata["latest_validation_result"] = val_res.model_dump()
                 if val_res.status == ValidationStatus.UNSUPPORTED:
                     response_text = UNVERIFIED_ANSWER_RESPONSE

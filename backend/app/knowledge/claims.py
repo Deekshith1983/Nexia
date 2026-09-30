@@ -163,6 +163,23 @@ class ClaimAligner:
         return cleaned if cleaned else [text.strip()]
 
 
+def is_refusal_response(text: str) -> bool:
+    """Check if an answer is a system-level refusal / insufficiency template rather than a factual statement."""
+    if not text:
+        return False
+    norm = text.strip().lower()
+    refusal_patterns = [
+        r"^i couldn'?t find that in the wikipedia article",
+        r"^i couldn'?t find sufficient information",
+        r"^i couldn'?t find information about",
+        r"^i was unable to find that on wikipedia",
+        r"^i do not have enough information",
+        r"^i don'?t have enough information",
+        r"^the retrieved wikipedia article does not contain",
+    ]
+    return any(re.search(p, norm) for p in refusal_patterns)
+
+
 class ClaimGrounder:
     """
     Validates and grounds extracted claims against retrieved evidence, structured facts,
@@ -399,12 +416,18 @@ class ClaimGrounder:
         evidence_items: Optional[List[Any]] = None,
         information_needs: Optional[List[Any]] = None,
     ) -> List[Claim]:
-        """Extract all statements from answer and ground each individually."""
+        """Extract all statements from answer and ground each individually. Refusal templates yield no claims."""
+        if is_refusal_response(answer):
+            logger.debug("[CLAIM GROUNDER] Answer is an insufficiency / refusal response; bypassing claim extraction.")
+            return []
+
         aligner = ClaimAligner()
         statements = aligner.extract_statements(answer)
         claims: List[Claim] = []
 
         for stmt in statements:
+            if is_refusal_response(stmt):
+                continue
             claim = self.ground_claim(
                 statement=stmt,
                 workspace=workspace,

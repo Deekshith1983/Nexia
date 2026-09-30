@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 from app.core.conversation_manager import Message
 from app.services.wikipedia_retriever import RetrievalResult, RetrievalStatus
@@ -12,6 +12,7 @@ class GenerationInput(BaseModel):
     retrieved_evidence: Optional[RetrievalResult] = None
     structured_knowledge: Optional[str] = None
     relevant_memories: Optional[List[str]] = None
+    answer_contract: Optional[Any] = None
     personalization_guidance: Optional[str] = None
     is_knowledge_query: bool = True
 
@@ -22,15 +23,18 @@ Wikipedia Evidence ({page_title}):
 {content}
 
 {structured_knowledge}How to read Wikipedia evidence:
-- Dates in parentheses immediately after a name are birth and death dates. Example: "Marie Curie (7 November 1867 – 4 July 1934)" means she was born on 7 November 1867 and died on 4 July 1934.
+- Dates in parentheses immediately after a name are birth and death dates or regnal periods. Example: "Harihara I (1336–1356)" means he ruled from 1336 to 1356.
 - Use all information present in the evidence to answer the question, including information in parentheses.
-- When the evidence contains multiple articles (indicated by [Article 1: ...] headers), use all of them.
+- When the evidence contains multiple articles (indicated by [Article 1: ...] headers) or section blocks (e.g., [Sangama dynasty], [Saluva dynasty]), use all of them.
 - When structured facts/relationships are provided, use them to support connected reasoning.
-- When evidence contains conflicting dates or contradictory accounts across sources, explicitly state the differing accounts cautiously (e.g., "Available Wikipedia evidence contains conflicting accounts...") rather than arbitrarily picking one side.
+- When evidence contains conflicting dates or contradictory accounts across sources, explicitly state the differing accounts cautiously rather than arbitrarily picking one side.
+- When asked to LIST entities/rulers/items: Output a clear, organized list (grouped by dynasty, era, or category if provided in the evidence). Do NOT say "The rulers mentioned in the evidence are..." or similar lazy meta-language. Present the list directly.
+- When asked WHY an entity is called one thing and not another (conceptual distinction, e.g. empire vs dynasty): Directly explain the distinction using the evidence (e.g. explaining that the empire refers to the overarching state/realm, whereas multiple successive dynasties/families ruled over it).
+- When answering negative questions about absence or exclusion, present what the evidence establishes for each subject clearly.
 
 Rules:
 - Answer using ONLY facts present in the evidence above.
-- Match the depth to the question: concise for simple facts, thorough for comparisons or complex topics.
+- Match the depth to the question: concise for simple facts, structured for lists, thorough for comparisons or explanations.
 - If the evidence genuinely does not contain the answer, say: "I couldn't find that in the Wikipedia article."
 - Do not invent artificial confidence numbers or output internal system codes.
 - Do not add commentary, caveats, or explanations beyond what the user asked for.

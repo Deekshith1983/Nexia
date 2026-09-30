@@ -103,7 +103,7 @@ class WikipediaNavigator:
 
     API_URL = "https://en.wikipedia.org/w/api.php"
     SUMMARY_URL = "https://en.wikipedia.org/api/rest_v1/page/summary/"
-    USER_AGENT = "NexiaAgent/1.0 (https://github.com/Deekshith1983/Nexia)"
+    USER_AGENT = "NexiaBot/1.0 (https://github.com/Deekshith1983/Nexia; contact: nexia-dev@example.com) httpx/0.27"
 
     # Ignored namespaces and meta pages for link discovery
     _META_LINK_PREFIXES = (

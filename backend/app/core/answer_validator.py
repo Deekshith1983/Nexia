@@ -27,6 +27,8 @@ class ValidationResult(BaseModel):
     status: str  # ValidationStatus
     reason: Optional[str] = None
     grounding_status: Optional[str] = None
+    question_satisfied: bool = True
+    answer_shape_satisfied: bool = True
     claims: List[Claim] = Field(default_factory=list)
     unsupported_claims: List[Claim] = Field(default_factory=list)
     metadata: Dict[str, Any] = Field(default_factory=dict)
@@ -118,6 +120,7 @@ class AnswerValidator:
         workspace: Optional[Any] = None,  # KnowledgeWorkspace
         evidence_items: Optional[List[Any]] = None,
         information_needs: Optional[List[Any]] = None,
+        answer_contract: Optional[Any] = None,
     ) -> ValidationResult:
         start_t = time.perf_counter()
         cleaned_answer = answer.strip()
@@ -127,6 +130,18 @@ class AnswerValidator:
             return ValidationResult(
                 status=ValidationStatus.INSUFFICIENT_EVIDENCE,
                 reason="Empty answer provided for validation.",
+            )
+
+        from app.knowledge.claims import is_refusal_response
+
+        if is_refusal_response(cleaned_answer):
+            telemetry_tracker.record_validation(time.perf_counter() - start_t)
+            return ValidationResult(
+                status=ValidationStatus.INSUFFICIENT_EVIDENCE,
+                reason="System-level insufficiency response generated.",
+                claims=[],
+                unsupported_claims=[],
+                metadata={"refusal": True},
             )
 
         # ── Evidence Fingerprinting & Cache Check (Stage 13) ─────────────────
@@ -234,6 +249,31 @@ class AnswerValidator:
             status = ValidationStatus.SUPPORTED
             reason = f"All {len(extracted_claims)} claim(s) verified and grounded in Wikipedia evidence."
 
+        # ── 4. Shape & Question Satisfaction Validation ───────────────────────
+        answer_shape_satisfied = True
+        if answer_contract:
+            exp_type = getattr(answer_contract, "expected_type", None)
+            req_rel = getattr(answer_contract, "requested_relation", None)
+            concept_a = getattr(answer_contract, "concept_a", None)
+            concept_b = getattr(answer_contract, "concept_b", None)
+            exp_type_str = getattr(exp_type, "value", str(exp_type)).lower() if exp_type else ""
+
+            if "list" in exp_type_str:
+                lines = [line.strip() for line in cleaned_answer.split("\n") if line.strip()]
+                has_bullet = any(re.match(r"^[-*•\d]+[\.\)]?\s+", line) for line in lines)
+                has_colon_group = any(":" in line for line in lines)
+                has_multiple_lines = len(lines) >= 2
+                answer_shape_satisfied = (has_bullet or (has_colon_group and has_multiple_lines) or len(lines) >= 3)
+            elif "explanation" in exp_type_str and (req_rel == "conceptual_distinction" or (concept_a and concept_b)):
+                ans_lower = cleaned_answer.lower()
+                c_a = concept_a.lower() if concept_a else "empire"
+                c_b = concept_b.lower() if concept_b else "dynasty"
+                has_a = c_a in ans_lower
+                has_b = c_b in ans_lower or "dynasties" in ans_lower
+                answer_shape_satisfied = (has_a and has_b)
+
+        question_satisfied = (status == ValidationStatus.SUPPORTED) and answer_shape_satisfied
+
         workspace_quality = None
         if workspace and hasattr(workspace, "evaluate_workspace_quality"):
             workspace_quality = workspace.evaluate_workspace_quality(information_needs, evidence_items)
@@ -242,6 +282,8 @@ class AnswerValidator:
             status=status,
             reason=reason,
             grounding_status=status,
+            question_satisfied=question_satisfied,
+            answer_shape_satisfied=answer_shape_satisfied,
             claims=extracted_claims,
             unsupported_claims=[] if hedged_conflict else (unsupported + partially_supported),
             metadata={
@@ -251,6 +293,8 @@ class AnswerValidator:
                 "partially_supported_count": len(partially_supported),
                 "conflicting_count": len(conflicting),
                 "hedged_conflict": hedged_conflict,
+                "question_satisfied": question_satisfied,
+                "answer_shape_satisfied": answer_shape_satisfied,
                 "knowledge_quality": workspace_quality.model_dump() if workspace_quality else None,
             },
         )

@@ -40,7 +40,7 @@ _STOP_WORDS = {
     "info", "information", "summarize", "summary", "summaries", "write",
     "wrote", "written", "writeup", "overview", "say", "says", "said",
     "mention", "mentions", "mentioned", "find", "finding", "search", "searching",
-    "show", "showing", "lookup",
+    "show", "showing", "lookup", "list", "lists", "listing", "out", "names",
 }
 
 
@@ -190,15 +190,31 @@ class ReflectionEngine:
                     )
 
         # ── 4.5. Claim-Level Grounding Failure Diagnosis (Stage 8) ────────────
-        if validation_result and validation_result.unsupported_claims:
-            first_unsupported = validation_result.unsupported_claims[0]
+        from app.knowledge.claims import is_refusal_response
+
+        # Refusal statements (e.g. "I couldn't find that in the Wikipedia article.") are system responses, NOT claims
+        valid_unsupported = [
+            c for c in (validation_result.unsupported_claims if validation_result else [])
+            if not is_refusal_response(c.statement)
+        ]
+
+        if valid_unsupported:
+            first_unsupported = valid_unsupported[0]
             claim_stmt = first_unsupported.statement
-            claim_entities = re.findall(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b", claim_stmt)
+            claim_entities = [
+                ent for ent in re.findall(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b", claim_stmt)
+                if _norm(ent) not in ("wikipedia", "article", "summary", "answer", "source")
+            ]
             target_ent = claim_entities[0] if claim_entities else None
             
             target_query = target_ent or re.sub(r"[^\w\s]", "", claim_stmt[:60]).strip()
             norm_target = _norm(target_query)
             
+            # Forbid searching for system terms like "wikipedia"
+            if norm_target in ("wikipedia", "article", "summary", "answer", "source", ""):
+                target_query = qu.entity or resolved_request
+                norm_target = _norm(target_query)
+
             if norm_target and norm_target not in executed_queries:
                 logger.info(
                     "[REFLECTION] Claim grounding failure detected on claim: %r. Triggering targeted repair: %r",
@@ -222,6 +238,34 @@ class ReflectionEngine:
                         "claim_id": first_unsupported.id,
                     },
                 )
+
+        # ── 4.8. Check Unresolved Information Needs ───────────────────────────
+        if research_ctx.information_needs:
+            for need in research_ctx.information_needs:
+                from app.agent.decomposition.models import NeedStatus
+                if need.status != NeedStatus.SATISFIED:
+                    repair_q = need.question
+                    norm_rq = _norm(repair_q)
+                    if norm_rq and norm_rq not in executed_queries and norm_rq not in ("wikipedia", ""):
+                        logger.info("[REFLECTION] Unresolved InformationNeed: %r. Triggering targeted research repair.", repair_q)
+                        return ReflectionResult(
+                            status=ReflectionStatus.NEEDS_RESEARCH_REPAIR,
+                            issue=f"Unresolved InformationNeed: '{need.purpose}'",
+                            missing_information=repair_q,
+                            suggested_query=repair_q,
+                            target_entity=need.required_entities[0] if need.required_entities else None,
+                            corrective_action={
+                                "type": ResearchActionType.WIKIPEDIA_RETRIEVE.value if need.required_entities else ResearchActionType.WIKIPEDIA_SEARCH.value,
+                                "entity": need.required_entities[0] if need.required_entities else None,
+                                "query": repair_q,
+                                "objective": f"Targeted research for unresolved need: {need.purpose}",
+                            },
+                            metadata={
+                                "repair_attempt": repair_attempt,
+                                "strategy": "information_need_repair",
+                                "need_id": need.id,
+                            },
+                        )
 
         # ── 5. Missing Evidence / Specific Fact Gap Detection ─────────────────
         missing_fact_query = self._detect_missing_fact_gap(

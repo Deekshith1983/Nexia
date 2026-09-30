@@ -133,7 +133,60 @@ class QueryDecomposer:
                 needs.extend([need1, need2, need3])
                 return needs
 
-        # 3. Causal / Explanatory Decomposition Path
+        # 3. Negative / Exclusion Query Decomposition Path (e.g. "Why was Kamsa not considered...")
+        lower_q = resolved_query.lower()
+        is_negative = bool(
+            re.search(r"\b(?:why\s+(?:was|is|were|are|did)\s+.+?\s+not\s+(?:considered|included|part|an?\s+incarnation|a\s+reincarnation|among))\b", lower_q)
+            or (qu.answer_contract and getattr(qu.answer_contract, "negative_aspect", False))
+        )
+        if is_negative:
+            neg_match = re.search(r"(?i)why\s+(?:was|is|did)\s+(.+?)\s+not\s+(?:considered|an?\s+incarnation|a\s+reincarnation|regarded|treated|part of|included in)(?:\s+as)?\s*(.+?)(?:\s*\?|\s*$)", resolved_query)
+            subj = ""
+            target_group = ""
+            if neg_match:
+                subj = neg_match.group(1).strip()
+                subj = re.sub(r"^(?:the|a|an)\s+", "", subj, flags=re.IGNORECASE).strip()
+                target_group = neg_match.group(2).strip()
+                target_group = re.sub(r"^(?:as|of|an?|the|either)\s+", "", target_group, flags=re.IGNORECASE).strip()
+
+            subj = subj or qu.entity or "primary subject"
+            target_group = target_group or "reference group"
+
+            need_target = InformationNeed(
+                question=f"Identity and incarnations of {target_group}",
+                purpose=f"Establish factual basis for {target_group}",
+                priority=NeedPriority.HIGH,
+                required_entities=[target_group],
+                depth=1,
+            )
+            need_subj = InformationNeed(
+                question=f"Background and role of {subj}",
+                purpose=f"Establish identity and mythology of {subj}",
+                priority=NeedPriority.HIGH,
+                required_entities=[subj],
+                depth=1,
+            )
+            need_neg_relation = InformationNeed(
+                question=resolved_query,
+                purpose=f"Examine evidence for exclusion or distinction between {subj} and {target_group}",
+                priority=NeedPriority.MEDIUM,
+                required_entities=[subj, target_group],
+                dependencies=[need_target.id, need_subj.id],
+                depth=1,
+            )
+
+            # Check evidence reuse
+            if workspace:
+                for n, ent in [(need_target, target_group), (need_subj, subj)]:
+                    facts = workspace.find_facts(subject=ent)
+                    if facts:
+                        n.status = NeedStatus.SATISFIED
+                        n.supporting_evidence = [f.evidence_refs[0].page_title for f in facts if f.evidence_refs]
+
+            needs.extend([need_target, need_subj, need_neg_relation])
+            return needs
+
+        # 4. Causal / Explanatory Decomposition Path
         primary_entity = qu.entity or self._extract_primary_concept(resolved_query)
         need_foundational = InformationNeed(
             question=f"Core background and contributions of {primary_entity}",
