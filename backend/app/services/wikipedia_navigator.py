@@ -96,13 +96,20 @@ class NavigationHistory:
         }
 
 
+SECTION_ALIASES: Dict[str, List[str]] = {
+    "rulers": ["rulers", "kings", "monarchs", "dynasty", "succession", "princely state", "line of succession", "emperors", "sultans"],
+    "causes": ["causes", "decline", "fall", "collapse", "background", "history", "defeat and decline"],
+    "founder": ["founding", "establishment", "origin", "history", "early years", "background"],
+    "dates": ["chronology", "timeline", "history", "reign"],
+}
+
+
 class WikipediaNavigator:
     """
     Service responsible for fine-grained, structural Wikipedia navigation.
     """
 
     API_URL = "https://en.wikipedia.org/w/api.php"
-    SUMMARY_URL = "https://en.wikipedia.org/api/rest_v1/page/summary/"
     USER_AGENT = "NexiaBot/1.0 (https://github.com/Deekshith1983/Nexia; contact: nexia-dev@example.com) httpx/0.27"
 
     # Ignored namespaces and meta pages for link discovery
@@ -117,7 +124,7 @@ class WikipediaNavigator:
         client: Optional[httpx.AsyncClient] = None,
     ) -> WikipediaArticle:
         """
-        Fetch article summary, sections structure, and internal links.
+        Fetch article summary, sections structure, and internal links via Action API.
         Resolves redirects and identifies disambiguation pages.
         """
         headers = {"User-Agent": self.USER_AGENT}
@@ -127,24 +134,39 @@ class WikipediaNavigator:
             own_client = True
 
         try:
-            # 1. Fetch summary first for fast summary text & redirect/disambig detection
-            summary_data: Optional[Dict] = None
-            encoded = urllib.parse.quote(title.strip(), safe="")
-            try:
-                resp = await client.get(f"{self.SUMMARY_URL}{encoded}")
-                if resp.status_code == 200:
-                    summary_data = resp.json()
-            except Exception as e:
-                logger.debug("[NAVIGATOR] summary fetch error: %s", e)
+            # 1. Action API call for clean full-text extract & page info
+            query_params = {
+                "action": "query",
+                "prop": "extracts|info",
+                "inprop": "url",
+                "exlimit": "1",
+                "explaintext": "1",
+                "titles": title,
+                "redirects": 1,
+                "format": "json",
+            }
+            canonical_title = title
+            canonical_url = f"https://en.wikipedia.org/wiki/{urllib.parse.quote(title.replace(' ', '_'))}"
+            page_id = None
+            summary_text = ""
+            is_disambig = False
 
-            canonical_title = summary_data.get("title", title) if summary_data else title
-            canonical_url = (
-                summary_data.get("content_urls", {}).get("desktop", {}).get("page", f"https://en.wikipedia.org/wiki/{urllib.parse.quote(canonical_title)}")
-                if summary_data else f"https://en.wikipedia.org/wiki/{urllib.parse.quote(canonical_title)}"
-            )
-            is_disambig = (summary_data.get("type") == "disambiguation") if summary_data else False
-            summary_text = _clean_extract(summary_data.get("extract", "")) if summary_data else ""
-            page_id = summary_data.get("pageid") if summary_data else None
+            try:
+                resp = await client.get(self.API_URL, params=query_params)
+                if resp.status_code == 200:
+                    pages = resp.json().get("query", {}).get("pages", {})
+                    if pages:
+                        pdata = list(pages.values())[0]
+                        if "missing" not in pdata:
+                            canonical_title = pdata.get("title", title)
+                            canonical_url = pdata.get("fullurl") or canonical_url
+                            page_id = pdata.get("pageid")
+                            full_extract = pdata.get("extract", "")
+                            # Lead section before first == Section ==
+                            lead_parts = re.split(r"\n={2,5}\s*[^=\n]+?\s*={2,5}", full_extract, maxsplit=1)
+                            summary_text = _clean_extract(lead_parts[0]) if lead_parts else ""
+            except Exception as e:
+                logger.debug("[NAVIGATOR] query fetch error: %s", e)
 
             # 2. Fetch sections and links via MediaWiki Action API
             parse_params = {
@@ -201,7 +223,7 @@ class WikipediaNavigator:
                 links=links[:50],  # bounded links
                 is_disambiguation=is_disambig,
                 disambiguation_options=disambig_options,
-                is_redirect=(summary_data.get("type") == "redirect") if summary_data else False,
+                is_redirect=canonical_title != title,
                 redirect_target=canonical_title if canonical_title != title else None,
             )
 
@@ -229,21 +251,35 @@ class WikipediaNavigator:
             article = await self.retrieve_article_structure(page_title, client=client)
             norm_sec = _normalize(section_title)
             
+            # Step 1a: Exact or substring match
             matched_section: Optional[WikipediaSection] = None
             for s in article.sections:
-                if norm_sec == _normalize(s.title) or norm_sec in _normalize(s.title) or _normalize(s.title) in norm_sec:
+                s_norm = _normalize(s.title)
+                if norm_sec == s_norm or norm_sec in s_norm or s_norm in norm_sec:
                     matched_section = s
                     break
 
+            # Step 1b: Alias-based match
             if not matched_section:
-                logger.debug("[NAVIGATOR] Section %r not found on page %r, returning summary", section_title, page_title)
+                for alias_key, alias_list in SECTION_ALIASES.items():
+                    if alias_key in norm_sec or any(a in norm_sec for a in alias_list):
+                        for s in article.sections:
+                            s_norm = _normalize(s.title)
+                            if any(a in s_norm for a in alias_list):
+                                matched_section = s
+                                break
+                    if matched_section:
+                        break
+
+            if not matched_section:
+                logger.debug("[NAVIGATOR] Section %r not found on page %r", section_title, page_title)
                 return RetrievalResult(
-                    status=RetrievalStatus.SUCCESS if article.summary else RetrievalStatus.NO_RESULTS,
+                    status=RetrievalStatus.NO_RESULTS,
                     query=f"{page_title} - {section_title}",
                     page_title=article.page_title,
                     page_url=article.canonical_url,
-                    content=article.summary,
-                    metadata={"strategy": "section_fallback_summary", "requested_section": section_title},
+                    content="",
+                    metadata={"strategy": "section_not_found", "requested_section": section_title},
                 )
 
             # 2. Fetch specific section text via Action API

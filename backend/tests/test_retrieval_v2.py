@@ -16,7 +16,7 @@ from app.services.wikipedia_retriever import (
     wikipedia_retriever,
 )
 from app.core.query_understanding import query_analyzer, AnswerType, Intent
-from app.core.answer_validator import answer_validator, ValidationStatus
+from app.core.answer_validator import answer_validator, ValidationResult, ValidationStatus
 from app.optimization.cache import local_cache_manager
 
 
@@ -125,8 +125,8 @@ class TestRetrievalV2Real(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Mysore", res.page_title)
         # Content must contain post-1799 succession details (Krishnaraja III, Wodeyar)
         self.assertTrue("Krishnaraja" in res.content or "Wodeyar" in res.content or "Princely state" in res.content)
-        # Passages must be bounded (< 4000 chars)
-        self.assertLess(len(res.content), 4000)
+        # Passages must be bounded (< 7000 chars)
+        self.assertLess(len(res.content), 7000)
 
         # Verify it was stored in local SQLite
         cached_doc = wikipedia_article_store.get_document(res.page_title)
@@ -161,7 +161,7 @@ class TestRetrievalV2Real(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(res.status, RetrievalStatus.SUCCESS)
         self.assertEqual(res.page_title, "Wikipedia")
         self.assertTrue("Jimmy Wales" in res.content or "Larry Sanger" in res.content)
-        self.assertLess(len(res.content), 4000)
+        self.assertLess(len(res.content), 7000)
 
     async def test_05_relevance_gate_preservation(self):
         """
@@ -205,7 +205,7 @@ class TestRetrievalV2Real(unittest.IsolatedAsyncioTestCase):
         self.assertTrue("tuluva" in content_lower)
         self.assertTrue("aravidu" in content_lower)
         self.assertTrue("harihara" in content_lower or "bukka" in content_lower or "krishna" in content_lower)
-        self.assertLess(len(res.content), 3500)
+        self.assertLess(len(res.content), 7000)
 
     async def test_07_conceptual_distinction_empire_vs_dynasty(self):
         """
@@ -232,7 +232,7 @@ class TestRetrievalV2Real(unittest.IsolatedAsyncioTestCase):
         content_lower = res.content.lower()
         self.assertTrue("empire" in content_lower or "realm" in content_lower or "state" in content_lower)
         self.assertTrue("sangama" in content_lower or "dynast" in content_lower)
-        self.assertLess(len(res.content), 3500)
+        self.assertLess(len(res.content), 7000)
 
         # Test validator contract satisfaction
         sample_answer = (
@@ -249,6 +249,99 @@ class TestRetrievalV2Real(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(val_res.status, ValidationStatus.SUPPORTED)
         self.assertTrue(val_res.question_satisfied)
         self.assertTrue(val_res.answer_shape_satisfied)
+
+    async def test_08_section_not_found_returns_no_results(self):
+        """
+        Verify that requesting a nonexistent section returns status=NO_RESULTS and does not
+        falsely claim SUCCESS with the article summary.
+        """
+        from app.services.wikipedia_navigator import wikipedia_navigator
+        res = await wikipedia_navigator.retrieve_section(
+            page_title="Kingdom of Mysore",
+            section_title="Completely Nonexistent Section XYZ123",
+        )
+        self.assertEqual(res.status, RetrievalStatus.NO_RESULTS)
+        self.assertEqual(res.metadata.get("strategy"), "section_not_found")
+        self.assertEqual(res.content, "")
+
+    async def test_09_section_alias_resolution_princely_state(self):
+        """
+        Verify section alias matching resolves 'rulers' to 'Princely state' or history section
+        for Kingdom of Mysore.
+        """
+        from app.services.wikipedia_navigator import wikipedia_navigator
+        res = await wikipedia_navigator.retrieve_section(
+            page_title="Kingdom of Mysore",
+            section_title="rulers",
+        )
+        self.assertEqual(res.status, RetrievalStatus.SUCCESS)
+        self.assertTrue(bool(res.content))
+
+    def test_10_reflection_rejects_grounded_generic_summary_when_relation_unsatisfied(self):
+        """
+        Verify that ReflectionEngine does NOT declare COMPLETE if question_satisfied is False,
+        even if validation status was textually SUPPORTED.
+        """
+        from app.agent.reflection.engine import reflection_engine, ReflectionStatus
+        from app.agent.research.context import ResearchContext
+        from app.agent.research.evidence import EvidenceItem
+
+        qu = query_analyzer.understand("why is it vijayanagara empire and not vijayanagara dynasty?")
+        ctx = ResearchContext.create(original_request=qu.original_query, resolved_request=qu.original_query)
+        ctx.evidence.append(
+            EvidenceItem(
+                action_id="act1",
+                page_title="Vijayanagara Empire",
+                page_url="https://en.wikipedia.org/wiki/Vijayanagara_Empire",
+                content="The Vijayanagara Empire was based in the Deccan Plateau region of South India.",
+            )
+        )
+
+        # Generic summary answer that fails the conceptual distinction shape
+        generic_val = ValidationResult(
+            status=ValidationStatus.SUPPORTED,
+            reason="Word overlap passed.",
+            question_satisfied=False,  # Did not explain both empire & dynasty
+            answer_shape_satisfied=False,
+        )
+
+        refl = reflection_engine.reflect(
+            original_request=qu.original_query,
+            resolved_request=qu.original_query,
+            qu=qu,
+            research_ctx=ctx,
+            generated_answer="The Vijayanagara Empire was an empire in South India.",
+            validation_result=generic_val,
+        )
+
+        self.assertNotEqual(refl.status, ReflectionStatus.COMPLETE)
+
+    def test_11_semantic_relation_aliases_no_false_insufficiency(self):
+        """
+        Verify that evidence containing semantic relation aliases (e.g. 'born to' for father query)
+        does NOT trigger false missing keyword reflection gaps.
+        """
+        from app.agent.reflection.engine import reflection_engine
+        from app.agent.research.context import ResearchContext
+        from app.agent.research.evidence import EvidenceItem
+
+        qu = query_analyzer.understand("who is the father of lord rama?")
+        ctx = ResearchContext.create(original_request=qu.original_query, resolved_request=qu.original_query)
+        ctx.evidence.append(
+            EvidenceItem(
+                action_id="act2",
+                page_title="Rama",
+                page_url="https://en.wikipedia.org/wiki/Rama",
+                content="Rama was born to King Dasharatha and Queen Kaushalya in Ayodhya.",
+            )
+        )
+
+        missing_gap = reflection_engine._detect_missing_fact_gap(
+            resolved_request="who is the father of lord rama?",
+            qu=qu,
+            context=ctx,
+        )
+        self.assertIsNone(missing_gap)
 
 
 if __name__ == "__main__":

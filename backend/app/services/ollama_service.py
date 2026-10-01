@@ -46,7 +46,11 @@ class OllamaService(BaseLanguageModel):
         payload = {
             "model": self.model,
             "prompt": prompt,
-            "stream": False
+            "stream": False,
+            "options": {
+                "temperature": 0.1,
+                "top_p": 0.8,
+            },
         }
 
         try:
@@ -79,7 +83,11 @@ class OllamaService(BaseLanguageModel):
         payload = {
             "model": self.model,
             "prompt": prompt,
-            "stream": True
+            "stream": True,
+            "options": {
+                "temperature": 0.1,
+                "top_p": 0.8,
+            },
         }
 
         try:

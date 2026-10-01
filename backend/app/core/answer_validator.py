@@ -2,7 +2,7 @@ import hashlib
 import logging
 import re
 import time
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 from pydantic import BaseModel, Field
 from app.core.llm_interface import BaseLanguageModel
 from app.services.wikipedia_retriever import RetrievalResult, RetrievalStatus
@@ -53,9 +53,62 @@ def _significant_words(text: str) -> Set[str]:
     return {t for t in tokens if t not in _STOP_WORDS}
 
 
-def _heuristic_validate(answer: str, evidence_content: str) -> ValidationResult:
+def _check_contract_satisfaction(cleaned_answer: str, answer_contract: Optional[Any]) -> Tuple[bool, Optional[str]]:
+    """Verify whether the candidate answer structurally and semantically addresses the AnswerContract."""
+    if not answer_contract:
+        return True, None
+
+    exp_type = getattr(answer_contract, "expected_type", None) or getattr(answer_contract, "answer_type", None)
+    exp_type_str = getattr(exp_type, "value", str(exp_type)).lower() if exp_type else ""
+    req_rel = (getattr(answer_contract, "requested_relation", None) or "").lower()
+    target_ent = (getattr(answer_contract, "target_entity", None) or "").lower()
+    concept_a = (getattr(answer_contract, "concept_a", None) or "").lower()
+    concept_b = (getattr(answer_contract, "concept_b", None) or "").lower()
+    ans_lower = cleaned_answer.lower()
+
+    # 1. LIST Contract: must have multiple items/lines or bullet points
+    if "list" in exp_type_str or req_rel in ("rulers", "kings", "monarchs", "prime ministers", "dynasties"):
+        lines = [line.strip() for line in cleaned_answer.split("\n") if line.strip()]
+        has_bullet = any(re.match(r"^[-*•\d]+[\.\)]?\s+", line) for line in lines)
+        has_colon_group = any(":" in line for line in lines)
+        has_multiple_lines = len(lines) >= 2
+        if not (has_bullet or (has_colon_group and has_multiple_lines) or len(lines) >= 3):
+            return False, "LIST requirement not satisfied: answer must provide structured list items or chronological lines."
+
+    # 2. Conceptual Distinction Contract: must cover Concept A and Concept B with distinction rationale
+    elif req_rel == "conceptual_distinction" or (concept_a and concept_b):
+        c_a = concept_a if concept_a else "empire"
+        c_b = concept_b if concept_b else "dynasty"
+        has_a = c_a in ans_lower
+        has_b = c_b in ans_lower or "dynasties" in ans_lower
+        if not (has_a and has_b):
+            return False, f"Conceptual distinction requirement not satisfied: answer must address both '{c_a}' and '{c_b}'."
+
+    # 3. CAUSAL Contract: must contain causal explanation connectives
+    elif "causal" in exp_type_str or req_rel in ("causes", "cause", "decline", "fall", "collapse"):
+        has_causal_terms = any(
+            t in ans_lower
+            for t in ["because", "due to", "resulted in", "led to", "caused by", "reason", "factors", "following", "after the fall", "defeat", "decline"]
+        )
+        if not has_causal_terms:
+            return False, "CAUSAL requirement not satisfied: answer must explain causes/reasons rather than isolated dates."
+
+    # 4. RELATION / ATTRIBUTE Contract: target entity reference
+    if target_ent and len(target_ent) >= 3:
+        target_words = set(re.findall(r"\b[a-z]{3,}\b", target_ent))
+        if target_words and not any(w in ans_lower for w in target_words):
+            return False, f"Relation requirement not satisfied: answer must reference target entity '{target_ent}'."
+
+    return True, None
+
+
+def _heuristic_validate(
+    answer: str,
+    evidence_content: str,
+    answer_contract: Optional[Any] = None,
+) -> ValidationResult:
     """
-    Fast deterministic validation using significant-word overlap.
+    Fast deterministic validation using significant-word overlap and contract checks.
     """
     answer_words = _significant_words(answer)
     evidence_words = _significant_words(evidence_content)
@@ -64,6 +117,8 @@ def _heuristic_validate(answer: str, evidence_content: str) -> ValidationResult:
         return ValidationResult(
             status=ValidationStatus.INSUFFICIENT_EVIDENCE,
             reason="Answer contains no significant content words.",
+            question_satisfied=False,
+            answer_shape_satisfied=False,
             metadata={"method": "heuristic"},
         )
 
@@ -71,6 +126,8 @@ def _heuristic_validate(answer: str, evidence_content: str) -> ValidationResult:
         return ValidationResult(
             status=ValidationStatus.INSUFFICIENT_EVIDENCE,
             reason="Evidence contains no significant content words.",
+            question_satisfied=False,
+            answer_shape_satisfied=False,
             metadata={"method": "heuristic"},
         )
 
@@ -82,10 +139,27 @@ def _heuristic_validate(answer: str, evidence_content: str) -> ValidationResult:
         len(answer_words), len(evidence_words), len(overlap_words), overlap_ratio,
     )
 
-    if overlap_ratio >= 0.20:
+    shape_ok, shape_reason = _check_contract_satisfaction(answer, answer_contract)
+
+    if overlap_ratio >= 0.20 and shape_ok:
         return ValidationResult(
             status=ValidationStatus.SUPPORTED,
             reason=f"Word overlap {overlap_ratio:.0%} ({len(overlap_words)}/{len(answer_words)} significant terms).",
+            question_satisfied=True,
+            answer_shape_satisfied=True,
+            metadata={
+                "method": "heuristic",
+                "overlap_ratio": round(overlap_ratio, 3),
+                "overlap_count": len(overlap_words),
+                "answer_word_count": len(answer_words),
+            },
+        )
+    elif overlap_ratio >= 0.20 and not shape_ok:
+        return ValidationResult(
+            status=ValidationStatus.PARTIALLY_SUPPORTED,
+            reason=shape_reason or "Answer text is grounded but does not satisfy the AnswerContract shape/relation.",
+            question_satisfied=False,
+            answer_shape_satisfied=False,
             metadata={
                 "method": "heuristic",
                 "overlap_ratio": round(overlap_ratio, 3),
@@ -97,6 +171,8 @@ def _heuristic_validate(answer: str, evidence_content: str) -> ValidationResult:
         return ValidationResult(
             status=ValidationStatus.INSUFFICIENT_EVIDENCE,
             reason=f"Word overlap too low ({overlap_ratio:.0%}); answer may not be grounded in evidence.",
+            question_satisfied=False,
+            answer_shape_satisfied=shape_ok,
             metadata={
                 "method": "heuristic",
                 "overlap_ratio": round(overlap_ratio, 3),
@@ -130,6 +206,8 @@ class AnswerValidator:
             return ValidationResult(
                 status=ValidationStatus.INSUFFICIENT_EVIDENCE,
                 reason="Empty answer provided for validation.",
+                question_satisfied=False,
+                answer_shape_satisfied=False,
             )
 
         from app.knowledge.claims import is_refusal_response
@@ -139,6 +217,8 @@ class AnswerValidator:
             return ValidationResult(
                 status=ValidationStatus.INSUFFICIENT_EVIDENCE,
                 reason="System-level insufficiency response generated.",
+                question_satisfied=False,
+                answer_shape_satisfied=False,
                 claims=[],
                 unsupported_claims=[],
                 metadata={"refusal": True},
@@ -173,6 +253,8 @@ class AnswerValidator:
             return ValidationResult(
                 status=ValidationStatus.INSUFFICIENT_EVIDENCE,
                 reason="No valid Wikipedia evidence content available for validation.",
+                question_satisfied=False,
+                answer_shape_satisfied=False,
             )
 
         # ── 1. Claim-Level Grounding (Stage 8) ────────────────────────────────
@@ -241,7 +323,7 @@ class AnswerValidator:
         elif not extracted_claims:
             # Fallback to word-overlap heuristic
             ev_content = evidence.content if evidence and evidence.content else ""
-            res = _heuristic_validate(cleaned_answer, ev_content)
+            res = _heuristic_validate(cleaned_answer, ev_content, answer_contract=answer_contract)
             local_cache_manager.set_validation(cleaned_answer, ev_fingerprint, res)
             telemetry_tracker.record_validation(time.perf_counter() - start_t)
             return res
@@ -250,29 +332,13 @@ class AnswerValidator:
             reason = f"All {len(extracted_claims)} claim(s) verified and grounded in Wikipedia evidence."
 
         # ── 4. Shape & Question Satisfaction Validation ───────────────────────
-        answer_shape_satisfied = True
-        if answer_contract:
-            exp_type = getattr(answer_contract, "expected_type", None)
-            req_rel = getattr(answer_contract, "requested_relation", None)
-            concept_a = getattr(answer_contract, "concept_a", None)
-            concept_b = getattr(answer_contract, "concept_b", None)
-            exp_type_str = getattr(exp_type, "value", str(exp_type)).lower() if exp_type else ""
-
-            if "list" in exp_type_str:
-                lines = [line.strip() for line in cleaned_answer.split("\n") if line.strip()]
-                has_bullet = any(re.match(r"^[-*•\d]+[\.\)]?\s+", line) for line in lines)
-                has_colon_group = any(":" in line for line in lines)
-                has_multiple_lines = len(lines) >= 2
-                answer_shape_satisfied = (has_bullet or (has_colon_group and has_multiple_lines) or len(lines) >= 3)
-            elif "explanation" in exp_type_str and (req_rel == "conceptual_distinction" or (concept_a and concept_b)):
-                ans_lower = cleaned_answer.lower()
-                c_a = concept_a.lower() if concept_a else "empire"
-                c_b = concept_b.lower() if concept_b else "dynasty"
-                has_a = c_a in ans_lower
-                has_b = c_b in ans_lower or "dynasties" in ans_lower
-                answer_shape_satisfied = (has_a and has_b)
-
+        shape_ok, shape_reason = _check_contract_satisfaction(cleaned_answer, answer_contract)
+        answer_shape_satisfied = shape_ok
         question_satisfied = (status == ValidationStatus.SUPPORTED) and answer_shape_satisfied
+
+        if not shape_ok and status == ValidationStatus.SUPPORTED:
+            status = ValidationStatus.PARTIALLY_SUPPORTED
+            reason = shape_reason or "Answer text is grounded in evidence but does not satisfy the AnswerContract shape or requested relation."
 
         workspace_quality = None
         if workspace and hasattr(workspace, "evaluate_workspace_quality"):
@@ -295,6 +361,7 @@ class AnswerValidator:
                 "hedged_conflict": hedged_conflict,
                 "question_satisfied": question_satisfied,
                 "answer_shape_satisfied": answer_shape_satisfied,
+                "shape_reason": shape_reason,
                 "knowledge_quality": workspace_quality.model_dump() if workspace_quality else None,
             },
         )

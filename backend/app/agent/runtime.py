@@ -269,9 +269,9 @@ class NexiaAgentRuntime:
                 result = await cap.execute(mem_req)
                 return result, cid
 
-            # ── 2. Query Understanding (Route-First) ───────────────────────────
+            # ── 2. Query Understanding (Route-First Deterministic Fast Path) ───
             t = time.monotonic()
-            qu = await query_analyzer.analyze(user_message, ollama_service)
+            qu = query_analyzer.understand(user_message)
             qu_ms = int((time.monotonic() - t) * 1000)
             state.metadata["latest_query_understanding"] = qu.model_dump()
 

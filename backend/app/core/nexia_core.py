@@ -145,6 +145,7 @@ class NexiaCore:
             resolved_query=resolution.resolved_query,
             conversation_context=state.messages,
             retrieved_evidence=retrieval,
+            answer_contract=getattr(qu, "answer_contract", None),
             is_knowledge_query=is_knowledge,
         )
 
@@ -183,11 +184,12 @@ class NexiaCore:
                         and self.grounded_generator.has_sufficient_evidence(gen_input)
                         and accumulated_text != INSUFFICIENT_EVIDENCE_RESPONSE
                     ):
+                        try:
                             val_res = await self.answer_validator.validate(
                                 accumulated_text,
                                 retrieval,
                                 self.llm,
-                                answer_contract=getattr(analysis, "answer_contract", None),
+                                answer_contract=getattr(qu, "answer_contract", None),
                             )
                             state.metadata["latest_validation_result"] = val_res.model_dump()
                         except Exception as e:
@@ -320,6 +322,7 @@ class NexiaCore:
             resolved_query=resolution.resolved_query,
             conversation_context=state.messages,
             retrieved_evidence=retrieval,
+            answer_contract=getattr(qu, "answer_contract", None),
             is_knowledge_query=is_knowledge,
         )
 
@@ -348,11 +351,12 @@ class NexiaCore:
             and self.grounded_generator.has_sufficient_evidence(gen_input)
             and response_text not in (INSUFFICIENT_EVIDENCE_RESPONSE, UNVERIFIED_ANSWER_RESPONSE, "")
         ):
+            try:
                 val_res = await self.answer_validator.validate(
                     response_text,
                     retrieval,
                     self.llm,
-                    answer_contract=getattr(analysis, "answer_contract", None),
+                    answer_contract=getattr(qu, "answer_contract", None),
                 )
                 state.metadata["latest_validation_result"] = val_res.model_dump()
                 if val_res.status == ValidationStatus.UNSUPPORTED:

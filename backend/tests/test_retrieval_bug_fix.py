@@ -208,11 +208,12 @@ class TestRetrievalBugFix(unittest.IsolatedAsyncioTestCase):
 
         query = "list out prime ministers of independent india"
 
-        # Mock Wikipedia search and summary for the fallback network call
+        # Mock Wikipedia search and extract for the fallback network call
         async def mock_get(url, *args, **kwargs):
             mock_resp = MagicMock()
             mock_resp.status_code = 200
-            if "api.php" in url:
+            params = kwargs.get("params", {})
+            if "list" in params and params["list"] == "search":
                 mock_resp.json.return_value = {
                     "query": {
                         "search": [
@@ -220,12 +221,18 @@ class TestRetrievalBugFix(unittest.IsolatedAsyncioTestCase):
                         ]
                     }
                 }
-            elif "rest_v1" in url:
+            else:
                 mock_resp.json.return_value = {
-                    "title": "List of prime ministers of India",
-                    "extract": "The Prime Minister of India is the head of government of the Republic of India...",
-                    "content_urls": {"desktop": {"page": "https://en.wikipedia.org/wiki/List_of_prime_ministers_of_India"}},
-                    "pageid": 12345,
+                    "query": {
+                        "pages": {
+                            "12345": {
+                                "pageid": 12345,
+                                "title": "List of prime ministers of India",
+                                "extract": "The Prime Minister of India is the head of government of the Republic of India.\n== Office ==\nThe office was created in 1947.",
+                                "fullurl": "https://en.wikipedia.org/wiki/List_of_prime_ministers_of_India",
+                            }
+                        }
+                    }
                 }
             return mock_resp
 

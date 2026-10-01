@@ -53,6 +53,26 @@ def _norm(text: str) -> str:
     return re.sub(r"\s+", " ", ascii_str).strip().lower()
 
 
+RELATION_ALIASES: Dict[str, List[str]] = {
+    "father": ["father", "parent", "son of", "born to", "mother"],
+    "author": ["author", "written by", "wrote", "creator", "authored"],
+    "founder": ["founder", "founded", "established", "created", "built"],
+    "rulers": ["ruler", "king", "monarch", "dynasty", "succession", "sultan", "emperor", "princely state", "throne"],
+    "conceptual_distinction": [
+        "empire",
+        "dynasty",
+        "realm",
+        "state",
+        "ruled by",
+        "consisted of",
+        "rather than",
+        "successive",
+    ],
+    "birth_date": ["born", "birth", "reign"],
+    "death_date": ["died", "death", "passed away", "assassinated"],
+}
+
+
 class ReflectionEngine:
     """
     Inspects agent state, research evidence, and validation outcomes to decide
@@ -84,9 +104,14 @@ class ReflectionEngine:
                 executed_queries.add(_norm(action.entity))
 
         # ── 1. Check for Validation Success ──────────────────────────────────
-        if validation_result and validation_result.status == ValidationStatus.SUPPORTED:
+        if (
+            validation_result
+            and validation_result.status == ValidationStatus.SUPPORTED
+            and getattr(validation_result, "question_satisfied", True)
+            and getattr(validation_result, "answer_shape_satisfied", True)
+        ):
             logger.debug(
-                "[REFLECTION] Validation passed (SUPPORTED). Task complete."
+                "[REFLECTION] Validation passed (SUPPORTED & question satisfied). Task complete."
             )
             return ReflectionResult(
                 status=ReflectionStatus.COMPLETE,
@@ -364,26 +389,8 @@ class ReflectionEngine:
     ) -> Optional[str]:
         """
         Extract specific target concepts from the query that are absent from evidence.
+        Uses semantic relation aliases rather than pure verbatim token matching.
         """
-        evidence_text = " ".join(e.content.lower() for e in context.evidence)
-        entity_words = set(re.findall(r"\b[a-z]{2,}\b", (qu.entity or "").lower()))
-
-        query_words = [
-            w for w in re.findall(r"\b[a-z]{3,}\b", resolved_request.lower())
-            if w not in _STOP_WORDS and w not in entity_words
-        ]
-
-        # Key topic words in query not found in current evidence
-        missing_keywords = [w for w in query_words if w not in evidence_text]
-        if missing_keywords:
-            if qu.entity:
-                # Construct a targeted query combining the main entity and missing keyword
-                kw_str = " ".join(missing_keywords[:2])
-                return f"{qu.entity} {kw_str}".strip()
-            else:
-                return " ".join(missing_keywords[:3]).strip()
-
-        # If no evidence at all, return the entity or cleaned query
         if not context.evidence:
             if qu.entity and qu.entity.strip():
                 return qu.entity.strip()
@@ -392,6 +399,40 @@ class ReflectionEngine:
                 if w.lower() not in _STOP_WORDS
             ]
             return " ".join(clean_words) if clean_words else resolved_request
+
+        evidence_text = " ".join(e.content.lower() for e in context.evidence)
+        contract = getattr(qu, "answer_contract", None)
+        relation = (qu.attribute or (contract.requested_relation if contract else "") or "").lower()
+
+        # If relation has known semantic aliases, check if ANY alias is present in evidence
+        aliases = RELATION_ALIASES.get(relation, [])
+        relation_covered = any(alias in evidence_text for alias in aliases) if aliases else False
+
+        # If contract defines concept_a / concept_b (e.g. empire vs dynasty), check them
+        concepts_covered = True
+        if contract and (contract.concept_a or contract.concept_b):
+            c_a = (contract.concept_a or "").lower()
+            c_b = (contract.concept_b or "").lower()
+            concepts_covered = (not c_a or c_a in evidence_text) and (not c_b or c_b in evidence_text or "dynast" in evidence_text)
+
+        if relation_covered and concepts_covered:
+            # Evidence has the semantic concepts covered; no lexical gap trigger needed
+            return None
+
+        entity_words = set(re.findall(r"\b[a-z]{2,}\b", (qu.entity or "").lower()))
+        query_words = [
+            w for w in re.findall(r"\b[a-z]{3,}\b", resolved_request.lower())
+            if w not in _STOP_WORDS and w not in entity_words
+        ]
+
+        # Key topic words in query not found in current evidence
+        missing_keywords = [w for w in query_words if w not in evidence_text]
+        if missing_keywords and not (relation_covered or concepts_covered):
+            if qu.entity:
+                kw_str = " ".join(missing_keywords[:2])
+                return f"{qu.entity} {kw_str}".strip()
+            else:
+                return " ".join(missing_keywords[:3]).strip()
 
         return None
 

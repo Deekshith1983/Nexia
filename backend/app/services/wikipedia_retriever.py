@@ -574,7 +574,7 @@ def score_and_select_passages(
     attribute: Optional[str] = None,
     constraints: Optional[Dict[str, Any]] = None,
     max_passages: int = 4,
-    max_total_chars: int = 3500,
+    max_total_chars: int = 2500,
 ) -> List[Any]:
     """
     Score WikipediaPassages against the InformationNeed (attribute, query, constraints).
@@ -595,7 +595,7 @@ def score_and_select_passages(
     temp_cues = set(re.findall(r"\w+", temporal_str)) - _STOP_WORDS
 
     # Relevant domain cues for common attributes
-    attribute_cues: Dict[str, Set[str]] = {
+    attribute_cues: Dict[str, set[str]] = {
         "rulers": {"ruler", "rulers", "king", "kings", "monarch", "monarchs", "sultan", "sultans", "reign", "succession", "emperor", "dynasty", "throne", "wodeyar", "prince", "ascended"},
         "prime ministers": {"prime minister", "premier", "tenure", "cabinet", "elected", "office", "term"},
         "parents": {"father", "mother", "parent", "parents", "born to", "son of", "daughter of", "dasharatha", "kaushalya"},
@@ -716,7 +716,7 @@ def score_and_select_passages(
 
         # Lead section baseline
         if s_title_norm == "lead":
-            score += 20.0
+            score += 60.0
 
         p.score = score
         scored.append((score, p))
@@ -749,34 +749,10 @@ class WikipediaRetriever:
     """Service responsible for querying Wikipedia APIs and retrieving verified article content."""
 
     SEARCH_API_URL = "https://en.wikipedia.org/w/api.php"
-    SUMMARY_API_URL = "https://en.wikipedia.org/api/rest_v1/page/summary/"
     USER_AGENT = "NexiaBot/1.0 (https://github.com/Deekshith1983/Nexia; contact: nexia-dev@example.com) httpx/0.27"
 
-    async def _fetch_summary(
-        self, client: httpx.AsyncClient, title: str
-    ) -> Optional[Dict]:
-        """Fetch REST summary for a Wikipedia title."""
-        encoded = urllib.parse.quote(title.strip(), safe="")
-        try:
-            resp = await client.get(f"{self.SUMMARY_API_URL}{encoded}")
-        except Exception as e:
-            logger.debug("[WIKI] summary fetch error for %r: %s", title, e)
-            return None
-
-        if resp.status_code != 200:
-            return None
-
-        data = resp.json()
-        if data.get("type") in ("disambiguation",):
-            logger.debug("[WIKI] summary for %r is disambiguation — skipping", title)
-            return None
-        extract = data.get("extract", "").strip()
-        if not extract:
-            return None
-        return data
-
     async def _fetch_full_document(
-        self, client: httpx.AsyncClient, title: str, summary_data: Optional[Dict] = None
+        self, client: httpx.AsyncClient, title: str
     ) -> Optional[Any]:
         """
         Fetch full article wikitext/plain extracts via MediaWiki Action API (action=query&prop=extracts&explaintext=1).
@@ -871,9 +847,7 @@ class WikipediaRetriever:
 
             # Lead summary
             lead_summary = ""
-            if summary_data and summary_data.get("extract"):
-                lead_summary = _clean_extract(summary_data["extract"])
-            elif sections and sections[0].title == "Lead":
+            if sections and sections[0].title == "Lead":
                 lead_summary = sections[0].content
 
             doc = WikipediaDocument.create(
@@ -1051,6 +1025,7 @@ class WikipediaRetriever:
                             attribute=attribute,
                             constraints=constraints,
                             max_passages=4,
+                            max_total_chars=2500,
                         )
                         if chosen_passages:
                             content_body = "\n\n".join(
@@ -1120,6 +1095,7 @@ class WikipediaRetriever:
                                     attribute=attribute,
                                     constraints=constraints,
                                     max_passages=4,
+                                    max_total_chars=2500,
                                 )
                                 content_body = "\n\n".join(
                                     f"[{p.section_title}]\n{p.text}" for p in chosen_passages
@@ -1179,15 +1155,11 @@ class WikipediaRetriever:
                 # ── Strategy 1: Direct entity title lookup ────────────────────
                 if entity and entity.strip():
                     for variant in self._entity_title_variants(entity):
-                        direct_data = await self._fetch_summary(client, variant)
-                        if direct_data:
-                            actual_title = direct_data.get("title", variant)
-                            extract = _clean_extract(direct_data.get("extract", ""))
-                            page_url = (
-                                direct_data.get("content_urls", {})
-                                .get("desktop", {})
-                                .get("page", "")
-                            )
+                        doc = await self._fetch_full_document(client, variant)
+                        if doc:
+                            actual_title = doc.canonical_title
+                            extract = doc.lead_summary or (doc.sections[0].content if doc.sections else "")
+                            page_url = doc.url
                             gate = evaluate_candidate_relevance(
                                 title=actual_title,
                                 content=extract,
@@ -1209,30 +1181,24 @@ class WikipediaRetriever:
                                 )
                                 continue
 
-                            # Fetch full WikipediaDocument via Action API
-                            doc = await self._fetch_full_document(client, actual_title, summary_data=direct_data)
-                            if doc:
-                                all_passages = doc.get_passages()
-                                chosen_passages = score_and_select_passages(
-                                    all_passages,
-                                    query=cleaned_query,
-                                    entity=entity,
-                                    attribute=attribute,
-                                    constraints=constraints,
-                                    max_passages=4,
+                            all_passages = doc.get_passages()
+                            chosen_passages = score_and_select_passages(
+                                all_passages,
+                                query=cleaned_query,
+                                entity=entity,
+                                attribute=attribute,
+                                constraints=constraints,
+                                max_passages=4,
+                                max_total_chars=2500,
+                            )
+                            if chosen_passages:
+                                content_body = "\n\n".join(
+                                    f"[{p.section_title}]\n{p.text}" for p in chosen_passages
                                 )
-                                if chosen_passages:
-                                    content_body = "\n\n".join(
-                                        f"[{p.section_title}]\n{p.text}" for p in chosen_passages
-                                    )
-                                else:
-                                    content_body = extract
-                                sections_used = list({p.section_title for p in chosen_passages})
-                                passage_count = len(chosen_passages)
                             else:
                                 content_body = extract
-                                sections_used = []
-                                passage_count = 0
+                            sections_used = list({p.section_title for p in chosen_passages})
+                            passage_count = len(chosen_passages)
 
                             result = RetrievalResult(
                                 status=RetrievalStatus.SUCCESS,
@@ -1243,7 +1209,7 @@ class WikipediaRetriever:
                                 metadata={
                                     "strategy": "direct_entity_lookup",
                                     "lookup_variant": variant,
-                                    "page_id": direct_data.get("pageid"),
+                                    "page_id": doc.page_id,
                                     "passage_count": passage_count,
                                     "sections_used": sections_used,
                                 },
@@ -1265,20 +1231,10 @@ class WikipediaRetriever:
                                     aliases_to_save.append(al)
 
                             try:
-                                if doc:
-                                    doc.aliases = aliases_to_save
-                                    doc.metadata["entity"] = entity
-                                    doc.metadata["attribute"] = attribute
-                                    wikipedia_article_store.save_document(doc)
-                                else:
-                                    wikipedia_article_store.save_article(
-                                        title=actual_title,
-                                        url=page_url,
-                                        summary=extract,
-                                        content=extract,
-                                        aliases=aliases_to_save,
-                                        metadata={"entity": entity, "attribute": attribute},
-                                    )
+                                doc.aliases = aliases_to_save
+                                doc.metadata["entity"] = entity
+                                doc.metadata["attribute"] = attribute
+                                wikipedia_article_store.save_document(doc)
                             except Exception as s_exc:
                                 logger.warning("[WIKI] article store save failed: %s", s_exc)
 
@@ -1348,8 +1304,8 @@ class WikipediaRetriever:
                         pass
                     return RetrievalResult(status=RetrievalStatus.NO_RESULTS, query=cleaned_query)
 
-                summary_data = await self._fetch_summary(client, selected_title)
-                if not summary_data:
+                doc = await self._fetch_full_document(client, selected_title)
+                if not doc:
                     dur_ms = (time.monotonic() - t_start) * 1000.0
                     try:
                         telemetry_tracker.record_wikipedia_call(request_id, duration_ms=dur_ms, cached=False)
@@ -1361,13 +1317,9 @@ class WikipediaRetriever:
                         page_title=selected_title,
                     )
 
-                actual_title = summary_data.get("title", selected_title)
-                extract = _clean_extract(summary_data.get("extract", ""))
-                page_url = (
-                    summary_data.get("content_urls", {})
-                    .get("desktop", {})
-                    .get("page", "")
-                )
+                actual_title = doc.canonical_title
+                extract = doc.lead_summary or (doc.sections[0].content if doc.sections else "")
+                page_url = doc.url
 
                 final_gate = evaluate_candidate_relevance(
                     title=actual_title,
@@ -1397,29 +1349,24 @@ class WikipediaRetriever:
                     )
 
                 # Fetch full WikipediaDocument via Action API
-                doc = await self._fetch_full_document(client, actual_title, summary_data=summary_data)
-                if doc:
-                    all_passages = doc.get_passages()
-                    chosen_passages = score_and_select_passages(
-                        all_passages,
-                        query=cleaned_query,
-                        entity=entity,
-                        attribute=attribute,
-                        constraints=constraints,
-                        max_passages=4,
+                all_passages = doc.get_passages()
+                chosen_passages = score_and_select_passages(
+                    all_passages,
+                    query=cleaned_query,
+                    entity=entity,
+                    attribute=attribute,
+                    constraints=constraints,
+                    max_passages=4,
+                    max_total_chars=2500,
+                )
+                if chosen_passages:
+                    content_body = "\n\n".join(
+                        f"[{p.section_title}]\n{p.text}" for p in chosen_passages
                     )
-                    if chosen_passages:
-                        content_body = "\n\n".join(
-                            f"[{p.section_title}]\n{p.text}" for p in chosen_passages
-                        )
-                    else:
-                        content_body = extract
-                    sections_used = list({p.section_title for p in chosen_passages})
-                    passage_count = len(chosen_passages)
                 else:
                     content_body = extract
-                    sections_used = []
-                    passage_count = 0
+                sections_used = list({p.section_title for p in chosen_passages})
+                passage_count = len(chosen_passages)
 
                 result = RetrievalResult(
                     status=RetrievalStatus.SUCCESS,
@@ -1430,7 +1377,7 @@ class WikipediaRetriever:
                     metadata={
                         "strategy": "search_ranked",
                         "snippet": search_results[0].get("snippet", ""),
-                        "page_id": summary_data.get("pageid"),
+                        "page_id": doc.page_id,
                         "candidates": [r.get("title") for r in search_results],
                         "passage_count": passage_count,
                         "sections_used": sections_used,

@@ -141,211 +141,133 @@ class WikipediaKnowledgeCapability(Capability):
         # Record user message in conversation history
         conversation_manager.add_message(cid, "user", ctx.original_query)
 
-        # ── Phase 2: Adaptive Reflection, Structured Knowledge & Repair Loop ──
-        max_repair_attempts = 2
-        repair_attempt = 0
-        executed_repair_queries: Set[str] = set()
-        final_answer = ""
+        # ── Phase 2: Structured Knowledge Extraction & Generation Input ───────
+        workspace = KnowledgeWorkspace(run_id=ctx.request_id)
+        if existing_workspace:
+            for k, ent in existing_workspace.entities.items():
+                workspace.entities[k] = ent
+            workspace.facts.extend(existing_workspace.facts)
+            workspace.relationships.extend(existing_workspace.relationships)
+            workspace.claims.extend(existing_workspace.claims)
+            workspace.contradictions.extend(existing_workspace.contradictions)
+            workspace.evidence_references.extend(existing_workspace.evidence_references)
+
+        for ev_item in research_ctx.evidence:
+            knowledge_extractor.extract_from_evidence(ev_item, workspace)
+
+        structured_summary = reasoning_engine.build_reasoned_knowledge_summary(
+            workspace, ctx.resolved_query, qu
+        )
+        state.metadata["latest_knowledge_workspace"] = workspace.to_summary_dict()
+
+        combined_retrieval = wikipedia_research_agent.build_combined_retrieval(research_ctx)
+        augmented_query = wikipedia_research_agent.augment_query_for_intent(
+            ctx.resolved_query, qu, len(research_ctx.evidence)
+        )
+        effective_profile = request.input.get("effective_profile")
+        pers_guidance = effective_profile.to_guidance_text() if effective_profile else None
+
+        gen_input = GenerationInput(
+            original_query=ctx.original_query,
+            resolved_query=augmented_query,
+            conversation_context=state.messages,
+            retrieved_evidence=combined_retrieval,
+            structured_knowledge=structured_summary if structured_summary else None,
+            answer_contract=qu.answer_contract,
+            personalization_guidance=pers_guidance,
+            is_knowledge_query=True,
+        )
+
+        has_evidence = grounded_generator.has_sufficient_evidence(gen_input)
         val_res: Optional[ValidationResult] = None
         refl_res: Optional[ReflectionResult] = None
+        repair_attempt = 0
 
-        while True:
-            # ── 2a. Structured Knowledge Extraction & Reasoning ────────────────
-            workspace = KnowledgeWorkspace(run_id=ctx.request_id)
-            if existing_workspace:
-                for k, ent in existing_workspace.entities.items():
-                    workspace.entities[k] = ent
-                workspace.facts.extend(existing_workspace.facts)
-                workspace.relationships.extend(existing_workspace.relationships)
-                workspace.claims.extend(existing_workspace.claims)
-                workspace.contradictions.extend(existing_workspace.contradictions)
-                workspace.evidence_references.extend(existing_workspace.evidence_references)
-
-            for ev_item in research_ctx.evidence:
-                knowledge_extractor.extract_from_evidence(ev_item, workspace)
-
-            structured_summary = reasoning_engine.build_reasoned_knowledge_summary(
-                workspace, ctx.resolved_query, qu
-            )
-            state.metadata["latest_knowledge_workspace"] = workspace.to_summary_dict()
-
-            combined_retrieval = wikipedia_research_agent.build_combined_retrieval(research_ctx)
-            augmented_query = wikipedia_research_agent.augment_query_for_intent(
-                ctx.resolved_query, qu, len(research_ctx.evidence)
-            )
-            effective_profile = request.input.get("effective_profile")
-            pers_guidance = effective_profile.to_guidance_text() if effective_profile else None
-
-            gen_input = GenerationInput(
-                original_query=ctx.original_query,
-                resolved_query=augmented_query,
-                conversation_context=state.messages,
-                retrieved_evidence=combined_retrieval,
-                structured_knowledge=structured_summary if structured_summary else None,
-                personalization_guidance=pers_guidance,
-                is_knowledge_query=True,
-            )
-
-            has_evidence = grounded_generator.has_sufficient_evidence(gen_input)
-            if not has_evidence or research_ctx.completion_status == CompletionStatus.INSUFFICIENT_KNOWLEDGE:
-                # Reflect on missing evidence
-                refl_res = reflection_engine.reflect(
-                    original_request=ctx.original_query,
-                    resolved_request=ctx.resolved_query,
-                    qu=qu,
-                    research_ctx=research_ctx,
-                    generated_answer=None,
-                    validation_result=None,
-                    repair_attempt=repair_attempt,
-                    max_repair_attempts=max_repair_attempts,
-                    executed_repair_queries=executed_repair_queries,
-                )
-                state.metadata["latest_reflection"] = refl_res.model_dump()
-
-                if (
-                    refl_res.status == ReflectionStatus.NEEDS_RESEARCH_REPAIR
-                    and refl_res.corrective_action
-                ):
-                    repair_attempt += 1
-                    act_data = refl_res.corrective_action
-                    query_str = act_data.get("query", refl_res.suggested_query or "")
-                    executed_repair_queries.add(_norm(query_str))
-                    repair_action = ResearchAction(
-                        action_id=str(uuid.uuid4())[:8],
-                        action_type=ResearchActionType(
-                            act_data.get("type", ResearchActionType.WIKIPEDIA_RETRIEVE.value)
-                        ),
-                        objective=act_data.get("objective", f"Targeted repair for {query_str}"),
-                        query=query_str,
-                        entity=act_data.get("entity", refl_res.target_entity),
-                    )
-                    success = await wikipedia_research_agent.execute_repair_action(
-                        repair_action, research_ctx
-                    )
-                    if success:
-                        continue  # retry with newly accumulated evidence
-
-                final_answer = INSUFFICIENT_EVIDENCE_RESPONSE
-                break
-
-            # ── Generate candidate answer ─────────────────────────────────────
-            prompt = grounded_generator.build_prompt(gen_input)
-            candidate_answer = await ollama_service.generate_response(prompt)
-            candidate_answer = candidate_answer.strip()
-
-            # ── Validate candidate answer ─────────────────────────────────────
-            if plan.validation_required:
-                try:
-                    val_res = await answer_validator.validate(
-                        answer=candidate_answer,
-                        evidence=combined_retrieval,
-                        llm=ollama_service,
-                        workspace=workspace,
-                        evidence_items=research_ctx.evidence,
-                        information_needs=getattr(research_ctx, "information_needs", None),
-                    )
-                    state.metadata["latest_validation_result"] = val_res.model_dump()
-                    if val_res.claims:
-                        state.metadata["latest_claims"] = [c.model_dump() for c in val_res.claims]
-                except Exception as exc:
-                    logger.warning("[WIKI CAP] validation exception: %s", exc)
-                    val_res = None
-
-            # ── Reflect on validation result & state ──────────────────────────
-            refl_res = reflection_engine.reflect(
-                original_request=ctx.original_query,
-                resolved_request=ctx.resolved_query,
-                qu=qu,
-                research_ctx=research_ctx,
-                generated_answer=candidate_answer,
-                validation_result=val_res,
-                repair_attempt=repair_attempt,
-                max_repair_attempts=max_repair_attempts,
-                executed_repair_queries=executed_repair_queries,
-            )
-            state.metadata["latest_reflection"] = refl_res.model_dump()
-
-            if refl_res.status == ReflectionStatus.COMPLETE:
-                final_answer = candidate_answer
-                break
-
-            elif refl_res.status == ReflectionStatus.NEEDS_RESEARCH_REPAIR:
-                repair_attempt += 1
-                act_data = refl_res.corrective_action or {}
-                query_str = act_data.get("query", refl_res.suggested_query or "")
-                executed_repair_queries.add(_norm(query_str))
-                repair_action = ResearchAction(
-                    action_id=str(uuid.uuid4())[:8],
-                    action_type=ResearchActionType(
-                        act_data.get("type", ResearchActionType.WIKIPEDIA_RETRIEVE.value)
-                    ),
-                    objective=act_data.get("objective", f"Targeted research for {query_str}"),
-                    query=query_str,
-                    entity=act_data.get("entity", refl_res.target_entity),
-                )
-                await wikipedia_research_agent.execute_repair_action(
-                    repair_action, research_ctx
-                )
-                continue
-
-            elif refl_res.status == ReflectionStatus.GENERATION_REPAIR_REQUIRED:
-                repair_attempt += 1
-                # Regenerate with existing evidence
-                continue
-
-            else:
-                # UNRECOVERABLE, CANCELLED, or exhausted budget
-                final_answer = INSUFFICIENT_EVIDENCE_RESPONSE
-                break
+        if not has_evidence or research_ctx.completion_status == CompletionStatus.INSUFFICIENT_KNOWLEDGE:
+            final_answer = INSUFFICIENT_EVIDENCE_RESPONSE
+        else:
+            final_answer = None
 
         # ── Phase 3: Final Source Attribution ─────────────────────────────────
         final_sources: List[SourceMetadata] = []
         if plan.attribution_required and research_ctx.evidence:
             final_sources = wikipedia_research_agent.build_multi_sources(
-                research_ctx, val_res
+                research_ctx, None
             )
             state.metadata["latest_sources"] = [s.model_dump() for s in final_sources]
 
-        # ── Persist Research Session Checkpoint ───────────────────────────────
-        if active_session:
-            if refl_res and refl_res.status == ReflectionStatus.COMPLETE and final_answer != INSUFFICIENT_EVIDENCE_RESPONSE:
-                research_session_manager.complete_session(
-                    active_session.session_id,
-                    research_ctx=research_ctx,
-                    workspace=workspace,
-                    claims=val_res.claims if val_res else None,
-                    sources=final_sources,
-                )
-            else:
-                research_session_manager.snapshot_research_context(
-                    active_session,
-                    research_ctx=research_ctx,
-                    workspace=workspace,
-                    claims=val_res.claims if val_res else None,
-                    sources=final_sources,
-                )
-                research_session_manager.save_session(active_session)
-
-        # ── Phase 4: Streaming generator ──────────────────────────────────────
+        # ── Phase 4: Streaming Generator (Real-time Token Streaming) ──────────
         async def stream_gen():
-            conversation_manager.add_message(cid, "assistant", final_answer)
-            total_ms = int((time.monotonic() - t_start) * 1000)
-            logger.info(
-                "[WIKI CAP] cid=%s actions=%d repairs=%d evidence=%d "
-                "refl=%s total_ms=%d chars=%d pages=%s",
-                cid[:8],
-                len(research_ctx.completed_actions),
-                repair_attempt,
-                len(research_ctx.evidence),
-                refl_res.status.value if refl_res else "NONE",
-                total_ms,
-                len(final_answer),
-                [e.page_title for e in research_ctx.evidence],
-            )
-            # Yield in word chunks to support SSE streaming
-            words = re.findall(r"\S+|\s+", final_answer)
-            for w in words:
-                yield w
+            nonlocal val_res, refl_res
+            accumulated_text = ""
+            gen_start = time.monotonic()
+            try:
+                if final_answer == INSUFFICIENT_EVIDENCE_RESPONSE:
+                    accumulated_text = INSUFFICIENT_EVIDENCE_RESPONSE
+                    yield INSUFFICIENT_EVIDENCE_RESPONSE
+                else:
+                    prompt = grounded_generator.build_prompt(gen_input)
+                    async for token in ollama_service.stream_response(prompt):
+                        accumulated_text += token
+                        yield token
+            finally:
+                gen_sec = time.monotonic() - gen_start
+                total_ms = int((time.monotonic() - t_start) * 1000)
+                from app.optimization.telemetry import telemetry_tracker
+                telemetry_tracker.record_generation(gen_sec)
+
+                if accumulated_text.strip():
+                    conversation_manager.add_message(cid, "assistant", accumulated_text)
+
+                    # Post-generation validation & session snapshot
+                    if plan.validation_required and accumulated_text != INSUFFICIENT_EVIDENCE_RESPONSE:
+                        try:
+                            val_res = await answer_validator.validate(
+                                answer=accumulated_text,
+                                evidence=combined_retrieval,
+                                llm=ollama_service,
+                                workspace=workspace,
+                                evidence_items=research_ctx.evidence,
+                                information_needs=getattr(research_ctx, "information_needs", None),
+                                answer_contract=qu.answer_contract,
+                            )
+                            state.metadata["latest_validation_result"] = val_res.model_dump()
+                            if val_res.claims:
+                                state.metadata["latest_claims"] = [c.model_dump() for c in val_res.claims]
+                        except Exception as val_err:
+                            logger.debug("[WIKI CAP] post-stream validation error: %s", val_err)
+
+                    if active_session:
+                        try:
+                            if accumulated_text != INSUFFICIENT_EVIDENCE_RESPONSE:
+                                research_session_manager.complete_session(
+                                    active_session.session_id,
+                                    research_ctx=research_ctx,
+                                    workspace=workspace,
+                                    claims=val_res.claims if val_res else None,
+                                    sources=final_sources,
+                                )
+                            else:
+                                research_session_manager.snapshot_research_context(
+                                    active_session,
+                                    research_ctx=research_ctx,
+                                    workspace=workspace,
+                                    claims=val_res.claims if val_res else None,
+                                    sources=final_sources,
+                                )
+                                research_session_manager.save_session(active_session)
+                        except Exception as sess_err:
+                            logger.debug("[WIKI CAP] session snapshot error: %s", sess_err)
+
+                logger.info(
+                    "[WIKI CAP] cid=%s actions=%d evidence=%d total_ms=%d chars=%d pages=%s",
+                    cid[:8],
+                    len(research_ctx.completed_actions),
+                    len(research_ctx.evidence),
+                    total_ms,
+                    len(accumulated_text),
+                    [e.page_title for e in research_ctx.evidence],
+                )
 
         return CapabilityResult(
             status=CapabilityStatus.SUCCESS,
@@ -366,8 +288,10 @@ class WikipediaKnowledgeCapability(Capability):
                 "claims": {
                     "count": len(val_res.claims) if val_res else 0,
                     "supported": len([c for c in val_res.claims if c.grounding_status == GroundingStatus.SUPPORTED]) if val_res else 0,
-                    "unsupported": len(val_res.unsupported_claims) if val_res else 0,
+                    "contradicted": len([c for c in val_res.claims if c.grounding_status == GroundingStatus.CONTRADICTED]) if val_res else 0,
+                    "unsupported": len([c for c in val_res.claims if c.grounding_status == GroundingStatus.UNSUPPORTED]) if val_res else 0,
                 },
+                "sources": [s.model_dump() for s in final_sources],
             },
         )
 

@@ -17,29 +17,51 @@ class GenerationInput(BaseModel):
     is_knowledge_query: bool = True
 
 
-GROUNDED_SYSTEM_PROMPT = """You are Nexia, an AI assistant that answers questions using Wikipedia evidence.
+def _format_answer_contract(contract: Optional[Any]) -> str:
+    if not contract:
+        return "No special answer structure was detected."
 
-Wikipedia Evidence ({page_title}):
+    answer_type = getattr(contract, "answer_type", "FACT")
+    answer_type_val = getattr(answer_type, "value", str(answer_type))
+    req_rel = getattr(contract, "requested_relation", None) or "none"
+    target_ent = getattr(contract, "target_entity", None)
+    concept_a = getattr(contract, "concept_a", None)
+    concept_b = getattr(contract, "concept_b", None)
+    is_neg = getattr(contract, "negative_or_exclusion", False)
+
+    lines = [
+        f"Answer type: {answer_type_val}",
+        f"Requested relation: {req_rel}",
+    ]
+    if target_ent:
+        lines.append(f"Target entity: {target_ent}")
+    if concept_a:
+        lines.append(f"Concept A: {concept_a}")
+    if concept_b:
+        lines.append(f"Concept B: {concept_b}")
+    if is_neg:
+        lines.append("Note: This is a negative or exclusion question.")
+
+    return "\n".join(lines)
+
+
+GROUNDED_SYSTEM_PROMPT = """You are Nexia, an accurate AI assistant that answers questions using Wikipedia evidence.
+
+Evidence ({page_title}):
 {content}
 
-{structured_knowledge}How to read Wikipedia evidence:
-- Dates in parentheses immediately after a name are birth and death dates or regnal periods. Example: "Harihara I (1336–1356)" means he ruled from 1336 to 1356.
-- Use all information present in the evidence to answer the question, including information in parentheses.
-- When the evidence contains multiple articles (indicated by [Article 1: ...] headers) or section blocks (e.g., [Sangama dynasty], [Saluva dynasty]), use all of them.
-- When structured facts/relationships are provided, use them to support connected reasoning.
-- When evidence contains conflicting dates or contradictory accounts across sources, explicitly state the differing accounts cautiously rather than arbitrarily picking one side.
-- When asked to LIST entities/rulers/items: Output a clear, organized list (grouped by dynasty, era, or category if provided in the evidence). Do NOT say "The rulers mentioned in the evidence are..." or similar lazy meta-language. Present the list directly.
-- When asked WHY an entity is called one thing and not another (conceptual distinction, e.g. empire vs dynasty): Directly explain the distinction using the evidence (e.g. explaining that the empire refers to the overarching state/realm, whereas multiple successive dynasties/families ruled over it).
-- When answering negative questions about absence or exclusion, present what the evidence establishes for each subject clearly.
+{structured_knowledge}Answer Contract:
+{answer_contract}
 
-Rules:
-- Answer using ONLY facts present in the evidence above.
-- Match the depth to the question: concise for simple facts, structured for lists, thorough for comparisons or explanations.
-- If the evidence genuinely does not contain the answer, say: "I couldn't find that in the Wikipedia article."
-- Do not invent artificial confidence numbers or output internal system codes.
-- Do not add commentary, caveats, or explanations beyond what the user asked for.
+Instructions:
+- Answer using ONLY facts directly supported by the evidence above.
+- Satisfy the exact relation and format requested (e.g. direct list, factual explanation, dates).
+- Dates in parentheses indicate regnal periods or lifespan.
+- For lists: Output a clean, organized list without meta-phrases like "The evidence mentions...".
+- For distinction/why queries: Clearly explain both Concept A and Concept B from the evidence.
+- If the evidence does not contain the answer, reply: "I couldn't find that in the Wikipedia article."
 {personalization_guidance}
-Question: {query}
+Question: {original_query}
 Answer:"""
 
 CONVERSATIONAL_SYSTEM_PROMPT = """You are Nexia, a helpful and concise conversational assistant.
@@ -76,11 +98,14 @@ class GroundedGenerator:
         if gen_input.is_knowledge_query and self.has_sufficient_evidence(gen_input):
             ev = gen_input.retrieved_evidence
             sk_block = f"{gen_input.structured_knowledge}\n" if gen_input.structured_knowledge else ""
+            contract_block = _format_answer_contract(gen_input.answer_contract)
             return GROUNDED_SYSTEM_PROMPT.format(
                 page_title=ev.page_title or "Wikipedia Article",
                 content=ev.content,
                 structured_knowledge=sk_block,
+                answer_contract=contract_block,
                 personalization_guidance=pers_guidance,
+                original_query=gen_input.original_query,
                 query=gen_input.resolved_query,
             )
 
