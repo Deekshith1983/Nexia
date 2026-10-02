@@ -69,6 +69,10 @@ class AnswerContract(BaseModel):
     concept_a: Optional[str] = None
     concept_b: Optional[str] = None
     required_fields: List[str] = Field(default_factory=list)
+    required_attributes: List[str] = Field(default_factory=list)
+    is_multi_attribute: bool = False
+    ordering: Optional[str] = None
+    unverifiable_attribute: bool = False
     negative_or_exclusion: bool = False
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
@@ -178,6 +182,10 @@ def _extract_constraints(query: str) -> Dict[str, Any]:
     elif "step by step" in lower_q:
         constraints["format"] = "step_by_step"
 
+    # Ordering constraint extraction (e.g. "in chronological order", "timeline", "in order")
+    if re.search(r"\b(?:chronological(?:ly)?|in\s+chronological\s+order|timeline|time\s+order|in\s+order)\b", lower_q):
+        constraints["ordering"] = "chronological"
+
     # Temporal constraint extraction (e.g. "after Tipu Sultan", "during Hoysala dynasty", "in Dvapara Yuga")
     m_temp = re.search(
         r"\b(after|before|during|in)\s+([A-Za-z0-9\s]+?)(?:\s+(?:kingdom|dynasty|empire|era|age|period|century|yuga|sultan))?(?:\s*\?|\s*$)",
@@ -257,7 +265,9 @@ def _format_entity_casing(raw: str) -> str:
 def _clean_relation_subject(raw: str) -> str:
     """Clean the target subject of a relation/attribute query (e.g. 'lord rama' -> 'Rama')."""
     # Strip leading question openers if captured: "who is rama" -> "rama"
-    s = re.sub(r"^(?:who\s+(?:is|was|were)|what\s+(?:is|'s|was))\s+", "", raw.strip(), flags=re.I)
+    s = re.sub(r"^(?:who|what|which|where)\s+(?:is|was|were|are|'s)\s+", "", raw.strip(), flags=re.I)
+    # Strip trailing attribute phrases: e.g. ", their reign periods, major contributions..."
+    s = re.sub(r"(?:,\s*(?:their|and|with)?|\s+(?:and|with)\s+(?:their)?)\s+(?:reign|contribution|battle|war|achievement|period).*", "", s, flags=re.I).strip()
     ent = _format_entity_casing(s)
     # If starting with 'lord / saint / shri / sri ' in a relation target (e.g. 'father of lord rama'), strip for cleaner Wikipedia matching
     m_hon = re.match(r"^(?:lord|saint|shri|sri)\s+(.+)$", ent, re.I)
@@ -269,6 +279,10 @@ def _clean_relation_subject(raw: str) -> str:
 def extract_answer_contract(query: str, intent: Union[Intent, str], entity: Optional[str]) -> AnswerContract:
     """Extract AnswerContract for backwards compatibility."""
     lower_q = query.lower().strip()
+    
+    # Check for unverifiable personal preferences
+    is_unverifiable = bool(re.search(r"\bfavou?rite\s+(?:colou?r|food|dish|toy|game|movie|song|pet|hobby|childhood\s+toy)\b", lower_q))
+    
     if re.search(r"\b(?:why\s+was|why\s+is|why\s+were|why\s+did|how\s+was|how\s+is)\b.*?\b(?:not|never|neither|excluded|excluded\s+from|refused)\b", lower_q):
         required = []
         for match in re.findall(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b", query):
@@ -283,19 +297,36 @@ def extract_answer_contract(query: str, intent: Union[Intent, str], entity: Opti
             metadata={"pattern": "negative_causal"},
         )
     if (
-        re.search(r"\b(?:list(?:\s+out)?|all|names\s+of)\s+(?:the\s+)?(?:rulers|kings|monarchs|emperors|dynasties|presidents|prime\s+ministers|members|works|books)\b", lower_q)
-        or re.search(r"\bwho\s+were\s+(?:the\s+)?(?:rulers|kings|monarchs|emperors|prime\s+ministers|presidents)\b", lower_q)
+        re.search(r"\b(?:list(?:\s+out)?|all|names\s+of)\s+(?:the\s+)?(?:major\s+)?(?:rulers|kings|monarchs|emperors|dynasties|presidents|prime\s+ministers|members|works|books)\b", lower_q)
+        or re.search(r"\bwho\s+were\s+(?:the\s+)?(?:major\s+)?(?:rulers|kings|monarchs|emperors|prime\s+ministers|presidents)\b", lower_q)
         or "rulers of" in lower_q
         or "kings of" in lower_q
         or "prime ministers of" in lower_q
     ):
         relation = "prime ministers" if "prime minister" in lower_q else ("rulers" if any(w in lower_q for w in ["ruler", "rulers", "king", "kings", "monarch", "emperor"]) else "list")
+        
+        req_attrs = []
+        if re.search(r"\b(?:reign|period|periods|dates|tenure|tenures)\b", lower_q):
+            req_attrs.append("reign periods")
+        if re.search(r"\b(?:contribution|contributions|achievement|achievements|reform|reforms|work|works)\b", lower_q):
+            req_attrs.append("major contributions")
+        if re.search(r"\b(?:battle|battles|war|wars|campaign|campaigns)\b", lower_q):
+            req_attrs.append("important battles")
+        if re.search(r"\b(?:event|events|incident|incidents)\b", lower_q):
+            req_attrs.append("major events")
+
+        is_multi = len(req_attrs) > 0
+        ordering = "chronological" if re.search(r"\b(?:chronological|in\s+order|timeline)\b", lower_q) else None
+
         return AnswerContract(
             answer_type=AnswerType.LIST,
             target_entity=entity,
             requested_relation=relation,
             required_fields=[entity] if entity else [],
-            metadata={"pattern": "list_extraction"},
+            required_attributes=req_attrs,
+            is_multi_attribute=is_multi,
+            ordering=ordering,
+            metadata={"pattern": "list_extraction", "multi_attribute": is_multi, "attributes": req_attrs},
         )
     if re.search(r"\b(?:who\s+wrote|who\s+authored|author\s+of|writer\s+of|composer\s+of)\b", lower_q):
         return AnswerContract(
@@ -345,7 +376,8 @@ def extract_answer_contract(query: str, intent: Union[Intent, str], entity: Opti
     return AnswerContract(
         answer_type=AnswerType.FACT,
         target_entity=entity,
-        metadata={"pattern": "default_fact"},
+        unverifiable_attribute=is_unverifiable,
+        metadata={"pattern": "default_fact", "unverifiable": is_unverifiable},
     )
 
 
@@ -559,6 +591,25 @@ class QueryAnalyzer:
                 confidence=0.95,
             )
 
+        when_born_m = re.match(r"^when\s+(?:was|is)\s+(.+?)\s+born\??$", stripped, re.I)
+        if when_born_m:
+            raw_ent = when_born_m.group(1).strip()
+            if raw_ent.lower().split()[0] not in _REFERENCE_PRONOUNS:
+                ent = _format_entity_casing(raw_ent)
+                contract = extract_answer_contract(stripped, Intent.EVENT_FACT, ent)
+                return QueryUnderstanding(
+                    original_query=stripped,
+                    route=Route.KNOWLEDGE,
+                    intent=Intent.EVENT_FACT,
+                    entities=[ent] if ent else [],
+                    attribute="birth_date",
+                    answer_type=AnswerType.DATE,
+                    constraints=constraints,
+                    contract=contract,
+                    source="rule",
+                    confidence=1.0,
+                )
+
         when_die_m = re.match(r"^when\s+did\s+(.+?)\s+(?:die|pass\s+away)\??$", stripped, re.I)
         if when_die_m:
             ent = _format_entity_casing(when_die_m.group(1))
@@ -596,7 +647,20 @@ class QueryAnalyzer:
         when_gen_m = re.match(r"^when\s+(?:did|was|were|is|are)\s+(.+?)\??$", stripped, re.I)
         if when_gen_m:
             raw_ent = when_gen_m.group(1)
-            if raw_ent.lower().split()[0] not in _REFERENCE_PRONOUNS:
+            if raw_ent.lower().split()[0] in _REFERENCE_PRONOUNS:
+                return QueryUnderstanding(
+                    original_query=stripped,
+                    route=Route.KNOWLEDGE,
+                    intent=Intent.EVENT_FACT,
+                    entities=[],
+                    attribute="date",
+                    answer_type=AnswerType.DATE,
+                    needs_context=True,
+                    constraints=constraints,
+                    source="rule",
+                    confidence=0.95,
+                )
+            else:
                 ent = _format_entity_casing(raw_ent)
                 contract = extract_answer_contract(stripped, Intent.EVENT_FACT, ent)
                 return QueryUnderstanding(
@@ -613,24 +677,146 @@ class QueryAnalyzer:
                 )
 
         # ── 10. Attribute of Entity ("capital of France", "population of India", "father of Rama") ──
-        # Sub-case: "who is Rama's father" / "<entity>'s <attribute>"
-        poss_m = re.search(r"\b([A-Za-z0-9\s]+?)'s\s+(father|mother|son|daughter|wife|husband|capital|population|author|founder|creator|inventor)\b", stripped, re.I)
-        if poss_m:
-            ent = _clean_relation_subject(poss_m.group(1))
-            attr = poss_m.group(2).lower()
-            contract = extract_answer_contract(stripped, Intent.ATTRIBUTE, ent)
+        # Pronoun attribute queries (e.g. "What were his major contributions?", "What did he achieve?")
+        pronoun_attr_m = re.match(r"^(?:what\s+(?:were|was|is|are)\s+(?:his|her|their)\s+(.+?)|what\s+did\s+(?:he|she|they)\s+(.+?))\??$", stripped, re.I)
+        if pronoun_attr_m:
+            raw_attr = (pronoun_attr_m.group(1) or pronoun_attr_m.group(2)).strip().rstrip("?.!")
+            return QueryUnderstanding(
+                original_query=stripped,
+                route=Route.KNOWLEDGE,
+                intent=Intent.ATTRIBUTE,
+                entities=[],
+                attribute=raw_attr.lower(),
+                answer_type=AnswerType.FACT,
+                needs_context=True,
+                constraints=constraints,
+                source="rule",
+                confidence=0.95,
+            )
+
+        # Successor / Multi-hop ("who succeeded Shivaji Maharaj and what major events occurred during his reign")
+        successor_m = re.match(
+            r"^who\s+(?:succeeded|took\s+over\s+after|ruled\s+after)\s+(.+?)(?:\s+and\s+(.+?))?\??$",
+            stripped,
+            re.I,
+        )
+        if successor_m:
+            raw_ent = successor_m.group(1).strip()
+            sec_query = successor_m.group(2).strip() if successor_m.group(2) else ""
+            ent = _clean_relation_subject(raw_ent)
+            sub_q1 = f"who succeeded {ent}"
+            sub_q2 = sec_query if sec_query else f"major events during reign of successor of {ent}"
+            contract = AnswerContract(
+                answer_type=AnswerType.RELATION,
+                target_entity=ent,
+                requested_relation="successor",
+                required_fields=[ent, "successor"],
+                metadata={"pattern": "successor_multihop", "secondary_query": sec_query},
+            )
             return QueryUnderstanding(
                 original_query=stripped,
                 route=Route.KNOWLEDGE,
                 intent=Intent.ATTRIBUTE,
                 entities=[ent] if ent else [],
-                attribute=attr,
-                answer_type=AnswerType.PERSON if attr in ("father", "mother", "son", "daughter", "wife", "husband", "author", "founder", "creator", "inventor") else AnswerType.FACT,
+                attribute="successor",
+                answer_type=AnswerType.PERSON,
+                sub_queries=[sub_q1, sub_q2],
                 constraints=constraints,
                 contract=contract,
                 source="rule",
                 confidence=1.0,
+                metadata={"multihop": True, "secondary_query": sec_query},
             )
+
+        # Multi-attribute list: e.g. "List the major rulers of the Maratha Empire, their reign periods, major contributions, and important battles."
+        multi_attr_list_m = re.match(
+            r"^(?:list\s+(?:out\s+)?(?:the\s+)?(?:all\s+)?(?:major\s+)?(?:names\s+of\s+)?)?"
+            r"(rulers|kings|monarchs|emperors|prime\s+ministers|presidents|dynasties|members)\s+(?:of|in)\s+(?:the\s+)?"
+            r"([A-Za-z0-9\s]+?)"
+            r"(?:,\s*(?:their\s+)?|(?:\s+and\s+(?:their\s+)?))"
+            r"(.+?)\??$",
+            stripped,
+            re.I,
+        )
+        if multi_attr_list_m:
+            raw_cat = multi_attr_list_m.group(1).lower()
+            raw_ent = multi_attr_list_m.group(2).strip()
+            raw_attrs_text = multi_attr_list_m.group(3).strip()
+            ent = _clean_relation_subject(raw_ent)
+            
+            # Extract structured attribute bundle
+            req_attrs = []
+            if re.search(r"\b(?:reign|period|periods|dates|tenure|tenures)\b", raw_attrs_text, re.I):
+                req_attrs.append("reign periods")
+            if re.search(r"\b(?:contribution|contributions|achievement|achievements|reform|reforms|work|works)\b", raw_attrs_text, re.I):
+                req_attrs.append("major contributions")
+            if re.search(r"\b(?:battle|battles|war|wars|campaign|campaigns)\b", raw_attrs_text, re.I):
+                req_attrs.append("important battles")
+            if re.search(r"\b(?:event|events|incident|incidents)\b", raw_attrs_text, re.I):
+                req_attrs.append("major events")
+            if not req_attrs:
+                req_attrs = [raw_attrs_text]
+                
+            contract = AnswerContract(
+                answer_type=AnswerType.LIST,
+                target_entity=ent,
+                requested_relation=raw_cat,
+                required_fields=[ent],
+                required_attributes=req_attrs,
+                is_multi_attribute=True,
+                ordering=constraints.get("ordering"),
+                metadata={"pattern": "multi_attribute_list", "attributes": req_attrs},
+            )
+            return QueryUnderstanding(
+                original_query=stripped,
+                route=Route.KNOWLEDGE,
+                intent=Intent.LIST,
+                entities=[ent] if ent else [],
+                attribute=raw_cat,
+                answer_type=AnswerType.LIST,
+                constraints=constraints,
+                contract=contract,
+                source="rule",
+                confidence=1.0,
+                metadata={"multi_attribute": True, "required_attributes": req_attrs},
+            )
+
+        # General possessive: "<entity>'s <attribute>" (e.g. "what was Shivaji Maharaj's favorite color?", "who is rama's father")
+        poss_gen_m = re.match(
+            r"^(?:(?:(?:what|who|which|where|tell\s+me)(?:'s|\s+is|\s+was|'re|\s+were)?\s+)?(?:the\s+)?)?([A-Za-z0-9\s]+?)'s\s+(.+?)\??$",
+            stripped,
+            re.I,
+        )
+        if poss_gen_m:
+            raw_ent = poss_gen_m.group(1).strip()
+            raw_attr = poss_gen_m.group(2).strip()
+            first_w = raw_ent.lower().split()[0] if raw_ent else ""
+            _skip_poss = _REFERENCE_PRONOUNS | {"what", "who", "where", "when", "why", "how", "it", "that", "there", "here", "let", "which"}
+            if first_w not in _skip_poss and len(raw_ent) >= 2:
+                ent = _clean_relation_subject(raw_ent)
+                attr = raw_attr.lower().rstrip("?.!")
+                is_unverifiable = bool(re.search(r"\bfavou?rite\s+(?:colou?r|food|dish|toy|game|movie|song|pet|hobby|childhood\s+toy)\b", attr))
+                contract = AnswerContract(
+                    answer_type=AnswerType.PERSON if attr in ("father", "mother", "son", "daughter", "wife", "husband", "author", "founder", "creator", "inventor") else AnswerType.FACT,
+                    target_entity=ent,
+                    requested_relation=attr,
+                    required_fields=[ent, attr],
+                    unverifiable_attribute=is_unverifiable,
+                    metadata={"pattern": "possessive_attribute", "unverifiable": is_unverifiable},
+                )
+                return QueryUnderstanding(
+                    original_query=stripped,
+                    route=Route.KNOWLEDGE,
+                    intent=Intent.ATTRIBUTE,
+                    entities=[ent] if ent else [],
+                    attribute=attr,
+                    answer_type=contract.answer_type,
+                    constraints=constraints,
+                    contract=contract,
+                    source="rule",
+                    confidence=1.0,
+                    metadata={"unverifiable_attribute": is_unverifiable},
+                )
 
         # "who was/is father of lord Rama" / "who wrote X" / "who invented X"
         who_invented_m = re.match(r"^who\s+(?:invented|founded|created|discovered|developed|built)\s+(.+?)\??$", stripped, re.I)
@@ -670,7 +856,7 @@ class QueryAnalyzer:
         # "what is the capital of France" / "what's the population of India" / "who was father of lord Rama"
         # "list out prime ministers of independent india" / "list the rulers of mysore kingdom after tippu sultan"
         attr_of_m = re.search(
-            r"^(?:(?:what(?:'s|\s+is)\s+(?:the\s+)?|who\s+(?:was|were|is)\s+(?:the\s+)?|tell\s+me\s+(?:the\s+)?|list\s+(?:out\s+)?(?:the\s+)?(?:all\s+)?(?:names\s+of\s+)?))?"
+            r"^(?:(?:what(?:'s|\s+is)\s+(?:the\s+)?|who\s+(?:was|were|is)\s+(?:the\s+)?|tell\s+me\s+(?:the\s+)?|list\s+(?:out\s+)?(?:the\s+)?(?:all\s+)?(?:major\s+)?(?:names\s+of\s+)?))?"
             r"(capital|population|father|mother|son|daughter|wife|husband|founder|author|history|rulers|kings|monarchs|emperors|prime\s+ministers|presidents|dynasties|members|works|books)\s+(?:of|in|about)\s+(?:the\s+)?"
             r"(.+?)\??$",
             stripped,

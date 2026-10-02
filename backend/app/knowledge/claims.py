@@ -143,22 +143,33 @@ class ClaimAligner:
         if not text or not text.strip():
             return []
 
-        # Split on sentence boundaries and bullet points
-        raw_sentences = re.split(r"(?<=[.!?])\s+|\n+", text.strip())
         cleaned: List[str] = []
 
-        for s in raw_sentences:
-            s_clean = s.strip()
-            # Strip markdown bullets or list numbering
-            s_clean = re.sub(r"^[-*•]\s+", "", s_clean)
-            s_clean = re.sub(r"^\d+\.\s+", "", s_clean).strip()
-            
-            # Skip empty, meta or purely conversational sentences
-            if len(s_clean) < 10:
-                continue
-            if re.match(r"(?i)^(hello|hi|sources?|according to wikipedia|here is|in summary)", s_clean):
-                continue
-            cleaned.append(s_clean)
+        # Check for markdown tables
+        if "|" in text:
+            for line in text.split("\n"):
+                line_str = line.strip()
+                if line_str.startswith("|") and line_str.endswith("|") and not re.match(r"^\|[\s\-:|]+\|$", line_str):
+                    cells = [c.strip() for c in line_str.split("|")[1:-1] if c.strip()]
+                    if len(cells) >= 2 and not any(h in cells[0].lower() for h in ("ruler", "king", "name", "aspect", "dimension", "header")):
+                        cleaned.append(" | ".join(cells))
+
+        if not cleaned:
+            # Split on sentence boundaries and bullet points
+            raw_sentences = re.split(r"(?<=[.!?])\s+|\n+", text.strip())
+
+            for s in raw_sentences:
+                s_clean = s.strip()
+                # Strip markdown bullets or list numbering
+                s_clean = re.sub(r"^[-*•]\s+", "", s_clean)
+                s_clean = re.sub(r"^\d+\.\s+", "", s_clean).strip()
+                
+                # Skip empty, meta or purely conversational sentences
+                if len(s_clean) < 10:
+                    continue
+                if re.match(r"(?i)^(hello|hi|sources?|according to wikipedia|here is|in summary)", s_clean):
+                    continue
+                cleaned.append(s_clean)
 
         return cleaned if cleaned else [text.strip()]
 

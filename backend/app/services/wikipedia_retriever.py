@@ -610,6 +610,67 @@ def score_and_select_passages(
     # If the document has specific dynasty / list of rulers sections (e.g. Vijayanagara: Sangama, Saluva, Tuluva, Aravidu),
     # aggregate them together so the entire chronological dynasty sequence is provided to Gemma.
     if norm_attr in ("rulers", "kings", "monarchs", "emperors", "dynasties") or "list" in norm_q:
+        # Check if query also asks for battles or contributions
+        has_battles = any(w in norm_q or w in norm_attr for w in ("battle", "battles", "war", "wars", "campaign"))
+        has_contrib = any(w in norm_q or w in norm_attr for w in ("contribution", "contributions", "achievement", "administration", "reform"))
+        
+        if (has_battles or has_contrib) and not temporal_str:
+            # Multi-facet gathering: rulers + battles + contributions
+            facet_selected = []
+            curr_chars = 0
+            
+            # 1. Lead / Overview
+            lead_p = [p for p in passages if _normalize(p.section_title) in ("lead", "history", "overview")]
+            if lead_p:
+                p0 = lead_p[0]
+                p0.score = 160.0
+                facet_selected.append(p0)
+                curr_chars += len(p0.text) + len(p0.section_title) + 10
+                
+            # 2. Dynasty / Rulers / Chhatrapatis / Peshwas
+            ruler_p = [
+                p for p in passages
+                if any(k in _normalize(p.section_title) or k in _normalize(p.text[:150]) for k in ("dynasty", "rulers", "kings", "chhatrapati", "peshwa", "succession", "reign", "monarchs"))
+                and p not in facet_selected
+            ]
+            for p in ruler_p[:3]:
+                cost = len(p.text) + len(p.section_title) + 10
+                if curr_chars + cost <= max_total_chars:
+                    p.score = 150.0
+                    facet_selected.append(p)
+                    curr_chars += cost
+                    
+            # 3. Battles / Wars / Campaigns
+            if has_battles:
+                battle_p = [
+                    p for p in passages
+                    if any(k in _normalize(p.section_title) or k in _normalize(p.text[:150]) for k in ("battle", "war", "military", "campaign", "conflict", "panipat", "anglo-maratha", "conquest"))
+                    and p not in facet_selected
+                ]
+                for p in battle_p[:2]:
+                    cost = len(p.text) + len(p.section_title) + 10
+                    if curr_chars + cost <= max_total_chars:
+                        p.score = 140.0
+                        facet_selected.append(p)
+                        curr_chars += cost
+                        
+            # 4. Administration / Navy / Contributions
+            if has_contrib:
+                contrib_p = [
+                    p for p in passages
+                    if any(k in _normalize(p.section_title) or k in _normalize(p.text[:150]) for k in ("administration", "governance", "reforms", "navy", "forts", "economy", "legacy", "achievements"))
+                    and p not in facet_selected
+                ]
+                for p in contrib_p[:2]:
+                    cost = len(p.text) + len(p.section_title) + 10
+                    if curr_chars + cost <= max_total_chars:
+                        p.score = 135.0
+                        facet_selected.append(p)
+                        curr_chars += cost
+                        
+            if len(facet_selected) >= 2:
+                return facet_selected
+
         dynasty_passages = [
             p for p in passages
             if any(k in _normalize(p.section_title) for k in ("dynasty", "rulers", "kings", "monarchs", "list of"))

@@ -39,9 +39,19 @@ class QueryDecomposer:
     ) -> QueryComplexity:
         """
         Assess whether a query is SIMPLE (single fact/definition) or COMPLEX
-        (multi-entity, multi-hop, causal, or comparative).
+        (multi-entity, multi-hop, causal, multi-attribute, or comparative).
         """
         lower = resolved_query.lower()
+
+        # Multi-attribute list or multi-hop sub-queries are complex
+        if qu.contract and getattr(qu.contract, "is_multi_attribute", False):
+            return QueryComplexity.COMPLEX
+        if qu.sub_queries and len(qu.sub_queries) > 1:
+            return QueryComplexity.COMPLEX
+        if qu.contract and getattr(qu.contract, "requested_relation", "") == "successor":
+            return QueryComplexity.COMPLEX
+        if any(w in lower for w in ["reign", "contribution", "battle", "war", "achievement"]) and any(w in lower for w in ["list", "rulers", "kings", "emperors", "prime ministers", "monarchs"]):
+            return QueryComplexity.COMPLEX
 
         # Comparisons are always complex
         if qu.intent == IntentCategory.COMPARISON:
@@ -94,7 +104,60 @@ class QueryDecomposer:
             needs.append(need)
             return needs
 
-        # 2. Comparison Decomposition Path
+        # 2. Multi-Attribute List Path (e.g. "List rulers of Maratha Empire, reign periods, contributions, battles")
+        is_multi_attr_list = (
+            (qu.contract and getattr(qu.contract, "is_multi_attribute", False))
+            or (qu.intent == IntentCategory.LIST and any(w in resolved_query.lower() for w in ["reign", "contribution", "battle", "war", "achievement", "period"]))
+        )
+        if is_multi_attr_list:
+            primary_entity = qu.entity or self._extract_primary_concept(resolved_query)
+            need_roster = InformationNeed(
+                question=f"List of major rulers and dynasties of {primary_entity}",
+                purpose=f"Identify full ruler roster and succession sequence for {primary_entity}",
+                priority=NeedPriority.HIGH,
+                required_entities=[primary_entity],
+                depth=1,
+            )
+            need_details = InformationNeed(
+                question=f"Reign periods, contributions, and battles of {primary_entity} rulers",
+                purpose=f"Gather detailed attributes (reign, battles, contributions) for {primary_entity} rulers",
+                priority=NeedPriority.HIGH,
+                required_entities=[primary_entity],
+                dependencies=[need_roster.id],
+                depth=1,
+            )
+            needs.extend([need_roster, need_details])
+            return needs
+
+        # 2.5. Multi-Hop / Successor Path (e.g. "Who succeeded Shivaji Maharaj and what major events occurred...")
+        is_successor_multihop = (
+            (qu.contract and getattr(qu.contract, "requested_relation", "") == "successor")
+            or "succeeded" in resolved_query.lower()
+            or (qu.sub_queries and len(qu.sub_queries) > 1)
+        )
+        if is_successor_multihop and qu.entity:
+            primary_entity = qu.entity
+            sub1 = qu.sub_queries[0] if qu.sub_queries else f"Who succeeded {primary_entity}"
+            sub2 = qu.sub_queries[1] if (qu.sub_queries and len(qu.sub_queries) > 1) else f"Major events and reign of successor of {primary_entity}"
+            need1 = InformationNeed(
+                question=sub1,
+                purpose=f"Identify successor of {primary_entity}",
+                priority=NeedPriority.HIGH,
+                required_entities=[primary_entity],
+                depth=1,
+            )
+            need2 = InformationNeed(
+                question=sub2,
+                purpose=f"Retrieve events and contributions during successor's reign",
+                priority=NeedPriority.HIGH,
+                required_entities=[primary_entity],
+                dependencies=[need1.id],
+                depth=1,
+            )
+            needs.extend([need1, need2])
+            return needs
+
+        # 3. Comparison Decomposition Path
         if qu.intent == IntentCategory.COMPARISON or any(w in resolved_query.lower() for w in ["compare", "difference", " vs "]):
             entities = self._extract_comparison_entities(resolved_query, qu)
             if len(entities) >= 2:
@@ -133,7 +196,7 @@ class QueryDecomposer:
                 needs.extend([need1, need2, need3])
                 return needs
 
-        # 3. Negative / Exclusion Query Decomposition Path (e.g. "Why was Kamsa not considered...")
+        # 4. Negative / Exclusion Query Decomposition Path (e.g. "Why was Kamsa not considered...")
         lower_q = resolved_query.lower()
         is_negative = bool(
             re.search(r"\b(?:why\s+(?:was|is|were|are|did)\s+.+?\s+not\s+(?:considered|included|part|an?\s+incarnation|a\s+reincarnation|among))\b", lower_q)

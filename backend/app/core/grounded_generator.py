@@ -28,6 +28,9 @@ def _format_answer_contract(contract: Optional[Any]) -> str:
     concept_a = getattr(contract, "concept_a", None)
     concept_b = getattr(contract, "concept_b", None)
     is_neg = getattr(contract, "negative_or_exclusion", False)
+    req_attrs = getattr(contract, "required_attributes", [])
+    ordering = getattr(contract, "ordering", None)
+    is_unverifiable = getattr(contract, "unverifiable_attribute", False)
 
     lines = [
         f"Answer type: {answer_type_val}",
@@ -35,12 +38,19 @@ def _format_answer_contract(contract: Optional[Any]) -> str:
     ]
     if target_ent:
         lines.append(f"Target entity: {target_ent}")
+    if req_attrs:
+        lines.append(f"Required attributes per item: {', '.join(req_attrs)}")
+        lines.append("Formatting requirement: Provide a structured breakdown (table or bullet sections) containing all requested attributes (e.g. Ruler name, Reign period, Major contributions, Important battles) for each major figure.")
+    if ordering:
+        lines.append(f"Ordering: {ordering}")
     if concept_a:
         lines.append(f"Concept A: {concept_a}")
     if concept_b:
         lines.append(f"Concept B: {concept_b}")
     if is_neg:
         lines.append("Note: This is a negative or exclusion question.")
+    if is_unverifiable:
+        lines.append("Important: If the evidence does not explicitly confirm this specific attribute, reply: 'I couldn't find that in the Wikipedia article.'")
 
     return "\n".join(lines)
 
@@ -55,11 +65,11 @@ Evidence ({page_title}):
 
 Instructions:
 - Answer using ONLY facts directly supported by the evidence above.
-- Satisfy the exact relation and format requested (e.g. direct list, factual explanation, dates).
+- Satisfy the exact relation and format requested (e.g. direct list, factual explanation, dates, multi-attribute breakdown).
 - Dates in parentheses indicate regnal periods or lifespan.
-- For lists: Output a clean, organized list without meta-phrases like "The evidence mentions...".
+- For lists / multi-attribute questions: Output a clean, organized structured breakdown without meta-phrases like "The evidence mentions...".
 - For distinction/why queries: Clearly explain both Concept A and Concept B from the evidence.
-- If the evidence does not contain the answer, reply: "I couldn't find that in the Wikipedia article."
+- If the evidence does not contain the answer or requested attribute, reply: "I couldn't find that in the Wikipedia article."
 {personalization_guidance}
 Question: {original_query}
 Answer:"""
@@ -90,6 +100,16 @@ class GroundedGenerator:
             return False
         if not evidence.content or not evidence.content.strip():
             return False
+
+        # Guard against hallucinating unverifiable personal attributes (e.g. favorite color)
+        if gen_input.answer_contract and getattr(gen_input.answer_contract, "unverifiable_attribute", False):
+            req_rel = getattr(gen_input.answer_contract, "requested_relation", "") or ""
+            words = [w for w in req_rel.lower().split() if len(w) >= 3 and w not in ("the", "and", "his", "her", "was", "what")]
+            ev_lower = evidence.content.lower()
+            # If none of the specific attribute words (e.g. "favorite", "color", "toy") appear in the text, reject immediately
+            if words and not any(w in ev_lower for w in words):
+                return False
+
         return True
 
     def build_prompt(self, gen_input: GenerationInput) -> str:
