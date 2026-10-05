@@ -1,6 +1,7 @@
-"""Document Retriever Orchestrator for Stage 1 Single Document Retrieval."""
+"""Document Retriever Orchestrator with Candidate Scoring & Diagnostic Transparency."""
 
-from typing import Optional, List
+import re
+from typing import Optional, List, Tuple
 from app.schemas.retrieval import (
     SearchResponse,
     SearchCandidate,
@@ -9,32 +10,35 @@ from app.schemas.retrieval import (
 )
 from app.retrieval.wikipedia_client import WikipediaClient, WikipediaClientError
 from app.retrieval.parser import ArticleParser
+from app.retrieval.query_processor import QueryProcessor
 
 
 class DocumentRetriever:
-    """Coordinates Wikipedia search, candidate selection, article acquisition, and document parsing."""
+    """Coordinates Wikipedia search, candidate scoring/disambiguation, article acquisition, and document parsing."""
 
     def __init__(self, wikipedia_client: Optional[WikipediaClient] = None):
         self.client = wikipedia_client or WikipediaClient()
         self.parser = ArticleParser()
+        self.processor = QueryProcessor()
 
     async def search_candidates(self, query: str, limit: int = 10) -> SearchResponse:
-        """Search Wikipedia and return structured candidate articles."""
+        """Search Wikipedia and return structured candidate articles with selection scores."""
         clean_query = query.strip()
         if not clean_query:
             return SearchResponse(query=query, total_hits=0, candidates=[])
 
-        candidates = await self.client.search(clean_query, limit=limit)
+        raw_candidates = await self.client.search(clean_query, limit=limit)
+        scored_candidates = self._score_candidates(clean_query, raw_candidates)
         return SearchResponse(
             query=clean_query,
-            total_hits=len(candidates),
-            candidates=candidates,
+            total_hits=len(scored_candidates),
+            candidates=scored_candidates,
         )
 
     async def retrieve_document(
         self, query: str, explicit_title: Optional[str] = None
     ) -> DocumentRetrievalResponse:
-        """Retrieve and parse a full Wikipedia document based on query or title."""
+        """Retrieve and parse a full Wikipedia document based on query or explicit title."""
         target_query = query.strip()
         
         # If explicit title is provided, fetch directly
@@ -50,6 +54,7 @@ class DocumentRetriever:
                     snippet=document.introduction[:200] if document.introduction else "",
                     url=document.url,
                     word_count=document.metadata.total_words,
+                    selection_score=1.0,
                 )
 
                 return DocumentRetrievalResponse(
@@ -75,16 +80,18 @@ class DocumentRetriever:
 
         try:
             # 1. Search candidates
-            candidates = await self.client.search(target_query, limit=8)
-            if not candidates:
+            raw_candidates = await self.client.search(target_query, limit=8)
+            if not raw_candidates:
                 return DocumentRetrievalResponse(
                     query=target_query,
                     status="not_found",
                     error_message=f"No Wikipedia articles found for query: '{target_query}'",
                 )
 
-            # 2. Select best candidate
-            selected, others = self._select_candidate(target_query, candidates)
+            # 2. Score and select best candidate
+            scored_candidates = self._score_candidates(target_query, raw_candidates)
+            selected = scored_candidates[0]
+            others = scored_candidates[1:]
 
             # 3. Fetch full page content
             page_data = await self.client.fetch_page_content(selected.title)
@@ -113,20 +120,46 @@ class DocumentRetriever:
                 error_message=f"Unexpected retrieval failure: {exc}",
             )
 
-    def _select_candidate(
+    def _score_candidates(
         self, query: str, candidates: List[SearchCandidate]
-    ) -> tuple[SearchCandidate, List[SearchCandidate]]:
-        """Select the most relevant candidate article while preserving the rest for inspection."""
-        normalized_query = query.strip().lower()
+    ) -> List[SearchCandidate]:
+        """Score candidate titles against query tokens to prefer direct entity matches over administrative sub-offices."""
+        query_tokens = set(self.processor.tokenize(query, remove_stopwords=True))
+        if not query_tokens:
+            query_tokens = set(self.processor.tokenize(query, remove_stopwords=False))
 
-        # Check for exact title match
+        scored: List[Tuple[SearchCandidate, float]] = []
+
         for idx, cand in enumerate(candidates):
-            if cand.title.strip().lower() == normalized_query:
-                selected = cand
-                others = candidates[:idx] + candidates[idx + 1 :]
-                return selected, others
+            title_clean = cand.title.strip().lower()
+            title_tokens = set(self.processor.tokenize(cand.title, remove_stopwords=True))
+            
+            # Base rank penalty (preserves Wikipedia search rank signal as base)
+            rank_score = 1.0 / (1.0 + 0.1 * idx)
 
-        # Default to top search rank
-        selected = candidates[0]
-        others = candidates[1:]
-        return selected, others
+            # Check exact match
+            normalized_query = query.strip().lower()
+            if title_clean == normalized_query:
+                overlap_score = 2.0
+            else:
+                # Token Jaccard overlap between query content tokens and title tokens
+                intersection = query_tokens.intersection(title_tokens)
+                union = query_tokens.union(title_tokens)
+                jaccard = len(intersection) / len(union) if union else 0.0
+
+                # Penalty for secondary administrative offshoot keywords if not asked in query
+                penalty = 0.0
+                offshoot_keywords = {"office", "secretariat", "ministry", "department", "list of", "timeline of"}
+                for kw in offshoot_keywords:
+                    if kw in title_clean and kw not in normalized_query:
+                        penalty += 0.25
+
+                overlap_score = jaccard - penalty
+
+            total_score = round(rank_score + overlap_score, 4)
+            cand.selection_score = total_score
+            scored.append((cand, total_score))
+
+        # Sort candidates descending by total selection score
+        scored.sort(key=lambda item: item[1], reverse=True)
+        return [item[0] for item in scored]
