@@ -64,12 +64,14 @@ class DocumentRetriever:
                     document=document,
                     other_candidates=[],
                 )
-            except WikipediaClientError as exc:
-                return DocumentRetrievalResponse(
-                    query=target_query or title_to_fetch,
-                    status="not_found" if "not found" in str(exc).lower() else "error",
-                    error_message=str(exc),
-                )
+            except WikipediaClientError:
+                # If direct fetch fails (e.g. title variation), fall back to search below
+                if not target_query:
+                    return DocumentRetrievalResponse(
+                        query=title_to_fetch,
+                        status="not_found",
+                        error_message=f"Page '{title_to_fetch}' not found on Wikipedia.",
+                    )
 
         if not target_query:
             return DocumentRetrievalResponse(
@@ -147,11 +149,18 @@ class DocumentRetriever:
                 union = query_tokens.union(title_tokens)
                 jaccard = len(intersection) / len(union) if union else 0.0
 
-                # Penalty for secondary administrative offshoot keywords if not asked in query
+                # Keyword adjustment for secondary administrative offshoots vs list intent
                 penalty = 0.0
-                offshoot_keywords = {"office", "secretariat", "ministry", "department", "list of", "timeline of"}
+                is_list_query = any(w in normalized_query for w in ["list", "names", "who are", "who were", "prime ministers", "presidents", "all "])
+                offshoot_keywords = {"office", "secretariat", "ministry", "department", "timeline of"}
                 for kw in offshoot_keywords:
                     if kw in title_clean and kw not in normalized_query:
+                        penalty += 0.25
+
+                if "list of" in title_clean:
+                    if is_list_query:
+                        penalty -= 0.50  # Boost list articles when query requests lists
+                    elif "list of" not in normalized_query:
                         penalty += 0.25
 
                 overlap_score = jaccard - penalty

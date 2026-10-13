@@ -1,4 +1,4 @@
-"""Schemas for Nexia Advanced Query Constraints, Multi-Document Retrieval, and Evidence Validation."""
+"""Schemas for Nexia Advanced Query Constraints, Multi-Entity, Multi-Document Retrieval, and Evidence Validation."""
 
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, Field
@@ -161,7 +161,7 @@ class EvidencePassage(BaseModel):
 
 
 class PassageRetrievalRequest(BaseModel):
-    """Request schema for question-aware passage retrieval."""
+    """Request schema for question-aware single/multi-document passage retrieval."""
     question: str = Field(..., description="User question to answer")
     document: Optional[str] = Field(
         default=None,
@@ -206,3 +206,117 @@ class PassageRetrievalResponse(BaseModel):
         description="All candidate passages for diagnostic inspection"
     )
     error_message: Optional[str] = None
+
+
+# --- Stage 4: Multi-Entity & Multi-Document Retrieval Schemas ---
+
+class EntityItem(BaseModel):
+    """Extracted entity item with classification, role, and normalized text."""
+    text: str = Field(..., description="Original entity surface text: e.g. 'Shri Krishnadevaraya'")
+    normalized_text: str = Field(default="", description="Normalized entity text with honorifics removed: e.g. 'Krishnadevaraya'")
+    type: str = Field(..., description="Entity classification: 'PERSON', 'ORGANIZATION', 'GPE_COUNTRY', 'PRODUCT_OR_TECHNOLOGY', 'CONCEPT'")
+    role: str = Field(default="SUBJECT", description="Role in relation: 'SUBJECT', 'SUBJECT_A', 'SUBJECT_B', 'TARGET_RELATION', 'RELATED_ENTITY'")
+
+
+class RelationshipIntent(BaseModel):
+    """Structured representation of the requested relationship in Stage 4."""
+    type: str = Field(..., description="Normalized relation type: e.g. 'SUCCESSOR_OF', 'PREDECESSOR_OF', 'FOUNDED_BY', 'WORKED_WITH', 'STUDIED_AT', 'BILATERAL_RELATIONS', 'DIFFERENCE_COMPARISON'")
+    direction: str = Field(default="OUTGOING", description="Relationship direction: 'OUTGOING', 'INCOMING', 'BIDIRECTIONAL'")
+    target_role: Optional[str] = Field(default=None, description="Expected role of the target entity")
+    relation_terms: List[str] = Field(default_factory=list, description="Lexical terms associated with this relation for passage ranking")
+
+
+class Stage4StructuredQuery(BaseModel):
+    """Universal Structured Query Representation for Stage 4."""
+    raw_question: str
+    question_type: str = Field(..., description="'RELATIONSHIP', 'MULTI_ENTITY_RELATION', 'MULTI_ENTITY_COMPARISON', 'SINGLE_DOCUMENT'")
+    entities: List[EntityItem] = Field(default_factory=list)
+    relation: Optional[RelationshipIntent] = None
+    expected_answer_type: str = Field(default="PERSON", description="'PERSON', 'ORGANIZATION', 'GPE_COUNTRY', 'LOCATION', 'CONCEPT', 'RELATIONSHIP'")
+    constraints: Optional[QueryConstraints] = None
+    retrieval_terms: List[str] = Field(default_factory=list)
+
+
+class SourceDocumentReference(BaseModel):
+    """Provenance pointer to a source Wikipedia document."""
+    title: str
+    page_id: int
+    url: str
+
+
+class RelationshipEvidenceItem(BaseModel):
+    """Individually validated relationship evidence item with full provenance."""
+    subject: str = Field(..., description="Subject entity name")
+    relation: str = Field(..., description="Normalized relationship predicate")
+    object: str = Field(..., description="Discovered target entity / answer")
+    source_document: SourceDocumentReference
+    source_section: str
+    source_paragraph: str
+    retrieval_score: float = Field(..., description="BM25/Relevance retrieval score")
+    relationship_score: float = Field(..., description="Relational match confidence score (0.0 to 1.0)")
+    validated: bool = Field(..., description="Whether evidence satisfies relationship constraints")
+    passage_text: str = Field(..., description="Supporting passage text snippet")
+    summary_statement: str = Field(..., description="Concise human-readable statement derived from the evidence")
+
+
+class Stage4Diagnostics(BaseModel):
+    """Diagnostic telemetry detailing the execution path and any failure point."""
+    question_type_detected: str
+    entities_identified: List[str] = Field(default_factory=list)
+    relationship_detected: Optional[str] = None
+    documents_retrieved: int = 0
+    passages_evaluated: int = 0
+    relationship_evidence_found: bool = False
+    failure_stage: Optional[str] = Field(
+        default=None,
+        description="'NONE', 'ENTITY_EXTRACTION', 'DOCUMENT_RETRIEVAL', 'PASSAGE_RETRIEVAL', 'RELATIONSHIP_VALIDATION'"
+    )
+    details: Optional[str] = None
+
+
+class DocumentEvidenceBundle(BaseModel):
+    """Evidence bundle for a specific entity's retrieved Wikipedia article."""
+    entity_name: str
+    document_title: str
+    page_id: int
+    url: str
+    evidence_passages: List[EvidencePassage] = Field(default_factory=list)
+
+
+class ExtractedRelationship(BaseModel):
+    """Structured relationship discovered between multiple entities."""
+    subject: str = Field(..., description="Source entity")
+    relation: str = Field(..., description="Discovered relational predicate: e.g. 'studied_at', 'co_founded', 'bilateral_relations', 'successor_of'")
+    object: str = Field(..., description="Target entity")
+    relation_category: str = Field(default="GENERAL", description="'SUCCESSION', 'FOUNDER_BUSINESS', 'ACADEMIC_INSTITUTIONAL', 'GEOPOLITICAL', 'ASSOCIATION'")
+    confidence_score: float = Field(..., description="Confidence score between 0.0 and 1.0")
+    supporting_evidence_ids: List[str] = Field(default_factory=list, description="IDs of passages directly supporting this relationship")
+    summary_statement: str = Field(..., description="Human-readable statement synthesized directly from evidence")
+
+
+class MultiDocRetrievalRequest(BaseModel):
+    """Request schema for Stage 4 multi-entity cross-document retrieval."""
+    question: str = Field(..., description="Relationship or multi-entity question")
+    entities: Optional[List[str]] = Field(default=None, description="Optional manual list of entities to override extraction")
+    top_k_per_document: int = Field(default=3, ge=1, le=10, description="Max passages to return per document")
+    min_score: float = Field(default=0.15, ge=0.0, le=1.0, description="Minimum relevance score threshold")
+
+
+class MultiDocRetrievalResponse(BaseModel):
+    """Response schema for Stage 4 multi-entity cross-document retrieval."""
+    question: str
+    structured_query: Optional[Stage4StructuredQuery] = None
+    entities_identified: List[EntityItem] = Field(default_factory=list)
+    documents: List[DocumentEvidenceBundle] = Field(default_factory=list)
+    relationships_discovered: List[ExtractedRelationship] = Field(default_factory=list)
+    relationship_evidence: List[RelationshipEvidenceItem] = Field(default_factory=list)
+    diagnostics: Optional[Stage4Diagnostics] = None
+    status: str = Field(
+        ...,
+        description="'RELATIONSHIP_SUPPORTED', 'PARTIALLY_SUPPORTED', 'INSUFFICIENT_EVIDENCE', 'DOCUMENT_NOT_FOUND', or 'ERROR'"
+    )
+    is_relationship_proven: bool = Field(..., description="Whether cross-document evidence proves the relationship")
+    validation_reason: str = Field(..., description="Detailed explanation of relationship validation outcome")
+    total_passages_evaluated: int
+    error_message: Optional[str] = None
+

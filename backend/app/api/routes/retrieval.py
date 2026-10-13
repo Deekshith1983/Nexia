@@ -7,13 +7,17 @@ from app.schemas.retrieval import (
     DocumentRetrievalResponse,
     PassageRetrievalRequest,
     PassageRetrievalResponse,
+    MultiDocRetrievalRequest,
+    MultiDocRetrievalResponse,
 )
 from app.retrieval.document_retriever import DocumentRetriever
 from app.retrieval.passage_retriever import PassageRetriever
+from app.retrieval.multi_doc_retriever import MultiDocRetriever
 
 router = APIRouter(tags=["Retrieval"])
 document_retriever = DocumentRetriever()
 passage_retriever = PassageRetriever(document_retriever=document_retriever)
+multi_doc_retriever = MultiDocRetriever(document_retriever=document_retriever)
 
 
 # --- Stage 1: Search Candidates ---
@@ -73,3 +77,31 @@ async def retrieve_passages_get(
         min_score=min_score,
     )
     return await passage_retriever.retrieve_passages(request)
+
+
+# --- Stage 4: Multi-Entity & Multi-Document Retrieval & Relationship Discovery ---
+
+@router.post("/retrieval/multi-document", response_model=MultiDocRetrievalResponse)
+@router.post("/retrieve/multi-document", response_model=MultiDocRetrievalResponse, include_in_schema=False)
+async def retrieve_multi_document_post(
+    request: MultiDocRetrievalRequest = Body(...),
+) -> MultiDocRetrievalResponse:
+    """Stage 4: Extract entities, fetch multiple documents, search cross-document evidence, and detect relationships (POST)."""
+    return await multi_doc_retriever.retrieve_multi_document(request)
+
+
+@router.get("/retrieval/multi-document", response_model=MultiDocRetrievalResponse)
+@router.get("/retrieve/multi-document", response_model=MultiDocRetrievalResponse, include_in_schema=False)
+async def retrieve_multi_document_get(
+    question: str = Query(..., description="Multi-entity question to analyze"),
+    top_k_per_document: int = Query(default=3, ge=1, le=10, description="Max passages to return per document"),
+    min_score: float = Query(default=0.15, ge=0.0, le=1.0, description="Minimum relevance threshold"),
+) -> MultiDocRetrievalResponse:
+    """Stage 4: Extract entities, fetch multiple documents, search cross-document evidence, and detect relationships (GET)."""
+    request = MultiDocRetrievalRequest(
+        question=question,
+        top_k_per_document=top_k_per_document,
+        min_score=min_score,
+    )
+    return await multi_doc_retriever.retrieve_multi_document(request)
+
