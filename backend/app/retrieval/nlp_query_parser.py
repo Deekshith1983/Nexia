@@ -37,6 +37,15 @@ class NLPQueryParser:
 
     _nlp_instance: Optional[Language] = None
 
+    GENERIC_DESCRIPTORS: Set[str] = {
+        "device", "ancient device", "machine", "ancient machine", "instrument", "tool",
+        "system", "invention", "artifact", "mechanism", "person", "thing", "object",
+        "structure", "building", "event", "phenomenon", "process", "concept", "element",
+        "item", "material", "animal", "plant", "substance", "creature", "organism",
+        "weapon", "ancient weapon", "monument", "astronomical events", "complex system",
+        "system of gears", "complex system of gears", "gears"
+    }
+
     STOPWORDS_CHUNKS: Set[str] = {
         "who", "what", "where", "when", "why", "how", "which", "someone", "anyone",
         "something", "anything", "list", "name", "names", "details", "information",
@@ -60,6 +69,8 @@ class NLPQueryParser:
     def parse(cls, question: str) -> ParsedSemanticIntent:
         """Analyze natural language query into structured semantic intent."""
         cleaned_q = question.strip()
+        # Normalize unicode dashes (en-dash, em-dash, figure dash, hyphen, minus sign)
+        cleaned_q = re.sub(r"[\u2010\u2011\u2012\u2013\u2014\u2015\u2212–—]", " ", cleaned_q)
         # Clean common user typing quirks
         cleaned_q = re.sub(r"\bthr\b", "the", cleaned_q, flags=re.IGNORECASE)
         cleaned_q = re.sub(r"\bteh\b", "the", cleaned_q, flags=re.IGNORECASE)
@@ -79,8 +90,8 @@ class NLPQueryParser:
         # 2. Extract Meaningful Noun Chunks
         noun_chunks: List[str] = []
         for chunk in doc.noun_chunks:
-            # Strip leading determiners
-            c_text = re.sub(r"^(?:the|a|an|their|his|her|its)\s+", "", chunk.text.strip(), flags=re.IGNORECASE).strip()
+            # Strip leading determiners & interrogatives
+            c_text = re.sub(r"^(?:the|a|an|their|his|her|its|what|which|whose|who)\s+", "", chunk.text.strip(), flags=re.IGNORECASE).strip()
             if c_text.lower() not in cls.STOPWORDS_CHUNKS and len(c_text) > 1:
                 noun_chunks.append(c_text)
 
@@ -115,25 +126,27 @@ class NLPQueryParser:
                     role_or_office = chunk
             elif any(ak in c_low for ak in ASPECT_KEYWORDS):
                 sub_aspects.append(chunk)
+            elif c_low in cls.GENERIC_DESCRIPTORS:
+                sub_aspects.append(chunk)
             else:
                 if not target_realm and len(chunk.split()) <= 4:
                     target_realm = chunk
 
         # 5. Determine Primary Entity
-        # Prefer target_realm or named entities (PERSON / GPE / ORG)
+        # Prefer named entities (PERSON / GPE / ORG) or specific target_realm
         primary_entity = None
-        if target_realm:
-            primary_entity = target_realm
-        elif named_ents:
+        if named_ents:
             primary_entity = named_ents[0][0]
-        elif noun_chunks:
+        elif target_realm and target_realm.lower() not in cls.GENERIC_DESCRIPTORS:
+            primary_entity = target_realm
+        elif noun_chunks and noun_chunks[0].lower() not in cls.GENERIC_DESCRIPTORS:
             primary_entity = noun_chunks[0]
 
         # 6. Build Candidate EntityItems
         candidate_entities: List[EntityItem] = []
         seen_names = set()
 
-        if primary_entity and primary_entity.lower() not in seen_names:
+        if primary_entity and primary_entity.lower() not in seen_names and primary_entity.lower() not in cls.GENERIC_DESCRIPTORS:
             seen_names.add(primary_entity.lower())
             ent_type = "GPE_COUNTRY" if any(l in ["GPE", "LOC"] for t, l in named_ents if t == primary_entity) else "PERSON"
             candidate_entities.append(

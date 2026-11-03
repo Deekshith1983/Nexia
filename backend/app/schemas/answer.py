@@ -72,6 +72,14 @@ class RetrievalDiagnostics(BaseModel):
     embedding_model: str
     llm_model: str
     timings: Optional[TimingBreakdown] = None
+    query_complexity: Optional[str] = None
+    subqueries_generated: Optional[List[str]] = None
+    evidence_coverage_ratio: Optional[float] = None
+    missing_aspects: Optional[List[str]] = None
+    claims_verified: int = 0
+    claims_supported: int = 0
+    unsupported_claims_removed: int = 0
+    citations_stripped: int = 0
 
 
 

@@ -277,6 +277,8 @@ class EntityExtractor:
     def analyze_stage4_query(cls, question: str) -> Stage4StructuredQuery:
         """Parse raw question into full Stage 4 Structured Query Representation."""
         cleaned_q = question.strip()
+        # Normalize unicode dashes (en-dash, em-dash, figure dash, hyphen, minus sign)
+        cleaned_q = re.sub(r"[\u2010\u2011\u2012\u2013\u2014\u2015\u2212–—]", " ", cleaned_q)
         # Normalize common user typos in structural question words
         cleaned_q = re.sub(r"\bthr\b", "the", cleaned_q, flags=re.IGNORECASE)
         cleaned_q = re.sub(r"\bteh\b", "the", cleaned_q, flags=re.IGNORECASE)
@@ -428,7 +430,7 @@ class EntityExtractor:
 
         # 3. Capitalized Proper Noun Chunks fallback (Multi-entity detection)
         proper_noun_chunks = re.findall(
-            r"\b[A-Z][a-z]+(?:\s+(?:of|and|the|for|in|at)\s+[A-Z][a-z]+|\s+[A-Z][a-z]+)*\b",
+            r"\b[A-Z][a-z]+(?:\s+(?:of|and|the|for)\s+[A-Z][a-z]+|\s+[A-Z][a-z]+)*\b",
             cleaned_q,
         )
         EXCLUDED_PROPER_NOUNS = {
@@ -534,7 +536,7 @@ class EntityExtractor:
     @classmethod
     def normalize_entity_text(cls, entity_text: str) -> str:
         """Strip honorifics, titles, and structural artifacts from entity name without destroying core proper noun."""
-        cleaned = entity_text.strip()
+        cleaned = re.sub(r"[\u2010\u2011\u2012\u2013\u2014\u2015\u2212–—]", " ", entity_text).strip()
         tokens = cleaned.split()
         if not tokens:
             return cleaned
@@ -543,6 +545,10 @@ class EntityExtractor:
         first_lower = tokens[0].lower().rstrip(".,")
         if first_lower in cls.HONORIFICS and len(tokens) > 1:
             tokens = tokens[1:]
+
+        # Strip trailing prepositions
+        if tokens and tokens[-1].lower() in ("in", "of", "at", "for", "and"):
+            tokens = tokens[:-1]
 
         normalized = " ".join(tokens).strip()
 

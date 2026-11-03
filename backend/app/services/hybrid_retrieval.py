@@ -187,3 +187,170 @@ class HybridRetrievalService:
             )
 
         return final_chunks
+
+    async def retrieve_multi_query(
+        self,
+        queries: List[str],
+        page_ids: Optional[List[int]] = None,
+        top_k: Optional[int] = None,
+        session: Optional[AsyncSession] = None,
+        entity_boosts: Optional[List[str]] = None,
+    ) -> List[RetrievedChunk]:
+        """Perform multi-query vector + keyword retrieval across subqueries with RRF fusion."""
+        if not queries:
+            return []
+
+        k = top_k or settings.HYBRID_TOP_K
+        if session is not None:
+            return await self._execute_multi_query_retrieval(session, queries, page_ids, k, entity_boosts)
+
+        session_factory = get_session_factory()
+        async with session_factory() as sess:
+            return await self._execute_multi_query_retrieval(sess, queries, page_ids, k, entity_boosts)
+
+    async def _execute_multi_query_retrieval(
+        self,
+        session: AsyncSession,
+        queries: List[str],
+        page_ids: Optional[List[int]],
+        top_k: int,
+        entity_boosts: Optional[List[str]] = None,
+    ) -> List[RetrievedChunk]:
+        # 1. Batch generate embeddings for all queries in a single model call
+        query_vectors = await self.embedding_service.embed_batch(queries)
+
+        k_const = 60
+        fused_items: Dict[int, Dict] = {}
+        rrf_scores: Dict[int, float] = defaultdict(float)
+
+        # 2. Iterate queries and accumulate RRF ranks
+        for q_idx, (q_text, q_vec) in enumerate(zip(queries, query_vectors)):
+            # Weight primary query slightly higher than subqueries
+            weight = 1.2 if q_idx == 0 else 1.0
+
+            # Vector Search
+            vector_query = (
+                select(
+                    NexiaChunk.id,
+                    NexiaChunk.section_title,
+                    NexiaChunk.chunk_text,
+                    NexiaChunk.source_url,
+                    NexiaDocument.title.label("document_title"),
+                    NexiaChunk.embedding.cosine_distance(q_vec).label("distance"),
+                )
+                .join(NexiaDocument, NexiaChunk.document_id == NexiaDocument.id)
+                .where(NexiaChunk.embedding.is_not(None))
+            )
+            if page_ids:
+                vector_query = vector_query.where(NexiaChunk.page_id.in_(page_ids))
+
+            vector_query = vector_query.order_by("distance").limit(
+                settings.VECTOR_SEARCH_CANDIDATES
+            )
+            vector_results = (await session.execute(vector_query)).fetchall()
+
+            for rank_idx, row in enumerate(vector_results, start=1):
+                chunk_id = row.id
+                rrf_scores[chunk_id] += weight * (1.0 / (k_const + rank_idx))
+                if chunk_id not in fused_items:
+                    fused_items[chunk_id] = {
+                        "id": chunk_id,
+                        "section_title": row.section_title,
+                        "chunk_text": row.chunk_text,
+                        "source_url": row.source_url,
+                        "document_title": row.document_title,
+                        "vector_rank": rank_idx,
+                        "keyword_rank": None,
+                    }
+                elif fused_items[chunk_id]["vector_rank"] is None or rank_idx < fused_items[chunk_id]["vector_rank"]:
+                    fused_items[chunk_id]["vector_rank"] = rank_idx
+
+            # Keyword Search
+            keyword_query = (
+                select(
+                    NexiaChunk.id,
+                    NexiaChunk.section_title,
+                    NexiaChunk.chunk_text,
+                    NexiaChunk.source_url,
+                    NexiaDocument.title.label("document_title"),
+                    func.ts_rank_cd(
+                        func.to_tsvector("english", NexiaChunk.chunk_text),
+                        func.plainto_tsquery("english", q_text),
+                    ).label("rank_score"),
+                )
+                .join(NexiaDocument, NexiaChunk.document_id == NexiaDocument.id)
+                .where(
+                    func.to_tsvector("english", NexiaChunk.chunk_text).op("@@")(
+                        func.plainto_tsquery("english", q_text)
+                    )
+                )
+            )
+            if page_ids:
+                keyword_query = keyword_query.where(NexiaChunk.page_id.in_(page_ids))
+
+            keyword_query = keyword_query.order_by(text("rank_score DESC")).limit(
+                settings.KEYWORD_SEARCH_CANDIDATES
+            )
+            try:
+                keyword_results = (await session.execute(keyword_query)).fetchall()
+                for rank_idx, row in enumerate(keyword_results, start=1):
+                    chunk_id = row.id
+                    rrf_scores[chunk_id] += weight * (1.0 / (k_const + rank_idx))
+                    if chunk_id not in fused_items:
+                        fused_items[chunk_id] = {
+                            "id": chunk_id,
+                            "section_title": row.section_title,
+                            "chunk_text": row.chunk_text,
+                            "source_url": row.source_url,
+                            "document_title": row.document_title,
+                            "vector_rank": None,
+                            "keyword_rank": rank_idx,
+                        }
+                    elif fused_items[chunk_id]["keyword_rank"] is None or rank_idx < fused_items[chunk_id]["keyword_rank"]:
+                        fused_items[chunk_id]["keyword_rank"] = rank_idx
+            except Exception as e:
+                logger.warning("Keyword search failed for subquery '%s': %s", q_text, e)
+
+        # 3. Entity relevance boosting: give a calibrated bonus to passages that match target entities
+        if entity_boosts:
+            clean_boosts = [b.lower() for b in entity_boosts if b and len(b) > 2]
+            for chunk_id, data in fused_items.items():
+                p_text_low = data["chunk_text"].lower()
+                for ent_str in clean_boosts:
+                    if ent_str in p_text_low:
+                        rrf_scores[chunk_id] += 0.012
+
+        # 4. Sort and return top_k candidates
+        sorted_chunk_ids = sorted(
+            rrf_scores.keys(), key=lambda cid: rrf_scores[cid], reverse=True
+        )
+
+        final_chunks: List[RetrievedChunk] = []
+        for cid in sorted_chunk_ids[:top_k]:
+            data = fused_items[cid]
+            v_rank = data["vector_rank"]
+            k_rank = data["keyword_rank"]
+
+            if v_rank is not None and k_rank is not None:
+                method = "hybrid"
+            elif v_rank is not None:
+                method = "vector"
+            else:
+                method = "keyword"
+
+            final_chunks.append(
+                RetrievedChunk(
+                    chunk_id=cid,
+                    document_title=data["document_title"],
+                    source_url=data["source_url"],
+                    section_title=data["section_title"],
+                    passage_text=data["chunk_text"],
+                    vector_rank=v_rank,
+                    keyword_rank=k_rank,
+                    rrf_score=round(rrf_scores[cid], 5),
+                    retrieval_method=method,
+                )
+            )
+
+        return final_chunks
+

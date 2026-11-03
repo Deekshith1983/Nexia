@@ -43,6 +43,11 @@ class Settings(BaseSettings):
     KEYWORD_SEARCH_CANDIDATES: int = 20
     HYBRID_TOP_K: int = 10
 
+    # Adaptive NLP & Information-Dense Query Settings
+    ADAPTIVE_RETRIEVAL_ENABLED: bool = True
+    MAX_SUBQUERIES_PER_COMPLEX_QUERY: int = 4
+    COMPLEX_QUERY_TOP_K_PER_SUBQUERY: int = 4
+
     # Cache Policy
     CACHE_FRESHNESS_DAYS: int = 7
     CACHE_STALE_ON_FAILURE: str = "use_existing"

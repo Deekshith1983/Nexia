@@ -26,7 +26,9 @@ CRITICAL TONE RULES:
 3. Do NOT fabricate information not present in the evidence.
 4. LISTING RULE: If the user asks you to list, enumerate, or name items, output the COMPLETE list — do not stop early, do not summarize, do not say "and others". Every item from the evidence must appear. Begin directly with a heading (e.g. "Presidents of India:") or start the numbered list immediately. Do NOT write introductory filler like "Here is a list of... as documented in the provided evidence".
 5. COMPLETENESS RULE: Never end a sentence mid-way. Always complete every sentence you start.
-6. Only if the evidence passages completely lack information to answer the question, begin your reply with:
+6. ANTI-REPETITION: Do NOT repeat the same fact, sentence structure, or general background multiple times. State each distinct point clearly once.
+7. STRICT EVIDENCE BOUNDARY & ANTI-ELABORATION: State ONLY facts explicitly contained in the provided evidence. NEVER extrapolate, hypothesize, or introduce unmentioned external connections (such as unmentioned civilizations, Egyptian or Roman engineering, or architectural styles) not found in the text. If any requested aspect is not documented in the evidence, state clearly that it is not documented rather than inventing a bridge.
+8. Only if the evidence passages completely lack information to answer the question, begin your reply with:
 INSUFFICIENT_EVIDENCE: <concise reason>"""
 
 
@@ -72,6 +74,20 @@ def build_answer_prompt(ctx: PromptContext) -> str:
             "Every item must appear. Complete every sentence fully before stopping.\n"
         )
 
+    # Inject multi-part instruction for complex queries with multiple aspects
+    multi_part_instruction = ""
+    if any(m in ctx.question.lower() for m in [", and ", ";", " and who ", " and what ", " and how ", " and when ", " and where ", "including", "such as", "specifically"]):
+        multi_part_instruction = (
+            "\nSPECIAL INSTRUCTION: The user has asked a multi-part question with several distinct requirements. "
+            "Address EVERY requested aspect directly and thoroughly using ONLY the provided evidence passages:\n"
+            "- Do not repeat background information or fill space with generic descriptions.\n"
+            "- Address each requested aspect (e.g. roles, specific goods/commodities, mechanics, evidence sources) with specific named items and facts.\n"
+            "- STRICT EVIDENCE BOUNDARY: Do NOT extrapolate, speculate, or introduce unmentioned outside historical/engineering claims (such as unmentioned Egyptian or Roman engineering or architectural orders) not contained in the text.\n"
+            "- ABSTENTION: If the evidence passages do not contain information for any specific requested subquestion, state clearly that the available evidence does not document that aspect. Do NOT invent a plausible connection.\n"
+            "- Attach inline citations like [1], [2] at the end of each factual statement.\n"
+            "- Complete all sentences cleanly.\n"
+        )
+
     prompt_body = f"""USER QUESTION: {ctx.question}
 
 QUESTION INTENT:
@@ -87,6 +103,7 @@ KNOWN CONFLICTS OR UNCERTAINTIES:
 
 SUFFICIENCY RATING (from Nexia deterministic analysis): {ctx.sufficiency_rating}
 {list_instruction}
+{multi_part_instruction}
 INSTRUCTIONS:
 Provide a clear, authoritative, complete answer.
 If the question asks for a list: output a numbered list with EVERY item — do not summarize or truncate. Start directly with the list or a clean heading (e.g. "Presidents of India:").

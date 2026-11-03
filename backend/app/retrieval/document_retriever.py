@@ -149,6 +149,14 @@ class DocumentRetriever:
                 union = query_tokens.union(title_tokens)
                 jaccard = len(intersection) / len(union) if union else 0.0
 
+                # Also inspect snippet overlap: if snippet matches key query terms, add snippet bonus
+                snippet_bonus = 0.0
+                if cand.snippet:
+                    snippet_clean = cand.snippet.lower()
+                    snippet_matches = sum(1 for t in query_tokens if t in snippet_clean)
+                    if snippet_matches >= 2:
+                        snippet_bonus = 0.15 * min(snippet_matches, 3)
+
                 # Keyword adjustment for secondary administrative offshoots vs list intent
                 penalty = 0.0
                 is_list_query = any(w in normalized_query for w in ["list", "names", "who are", "who were", "prime ministers", "presidents", "all "])
@@ -163,7 +171,7 @@ class DocumentRetriever:
                     elif "list of" not in normalized_query:
                         penalty += 0.25
 
-                overlap_score = jaccard - penalty
+                overlap_score = jaccard + snippet_bonus - penalty
 
             total_score = round(rank_score + overlap_score, 4)
             cand.selection_score = total_score

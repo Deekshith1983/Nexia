@@ -3,7 +3,7 @@
 import logging
 import re
 import time
-from typing import Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -34,7 +34,111 @@ logger = logging.getLogger("nexia.orchestrator")
 
 from app.retrieval.passage_retriever import PassageRetriever
 from app.retrieval.nlp_query_parser import NLPQueryParser
+from app.retrieval.adaptive_nlp_planner import (
+    AdaptiveQueryAnalyzer,
+    EvidenceCoverageAssessor,
+    EvidencePacker,
+    QueryComplexity,
+    ComplexityAnalysisResult,
+)
 from app.schemas.retrieval import PassageRetrievalRequest
+
+
+class ClaimVerifier:
+    """Verifies generated answer sentences against cited evidence passages to eliminate ungrounded claims."""
+
+    @classmethod
+    def verify_and_clean_answer(
+        cls,
+        answer_text: str,
+        selected_chunks: List[Any],
+        question: str,
+    ) -> Tuple[str, Dict[str, int]]:
+        """Verify each sentence in answer against cited passages; prune or qualify ungrounded claims."""
+        stats = {
+            "claims_verified": 0,
+            "claims_supported": 0,
+            "unsupported_claims_removed": 0,
+            "citations_stripped": 0,
+        }
+        if not answer_text or not selected_chunks:
+            return answer_text, stats
+
+        all_evidence_text = " ".join(c.passage_text.lower() for c in selected_chunks)
+        all_evidence_words = set(re.findall(r"\b[a-zA-Z0-9]{3,}\b", all_evidence_text))
+
+        # Question keywords
+        q_words = set(re.findall(r"\b[a-zA-Z]{3,}\b", question.lower())) - NLPQueryParser.STOPWORDS_CHUNKS
+
+        paragraphs = answer_text.split("\n\n")
+        verified_paragraphs = []
+
+        for p in paragraphs:
+            # Check if this paragraph is a list header or list items
+            if p.strip().endswith(":") or p.strip().startswith(("-", "*", "1.", "2.", "3.", "4.")):
+                verified_paragraphs.append(p)
+                continue
+
+            sentences = re.split(r"(?<=[.!?])\s+", p.strip())
+            valid_sentences = []
+
+            for sent in sentences:
+                s_clean = sent.strip()
+                if not s_clean:
+                    continue
+
+                stats["claims_verified"] += 1
+                s_lower = s_clean.lower()
+
+                # 1. Check for off-topic intrusive content (e.g. fauna, bird observatory on island)
+                if any(w in s_lower for w in ["bird observatory", "migratory bird", "birdlife international", "wild goats", "flora and fauna", "bird migration"]):
+                    if not any(qw in q_words for qw in ["bird", "goat", "animal", "fauna"]):
+                        stats["unsupported_claims_removed"] += 1
+                        continue
+
+                # 2. Check for foreign ungrounded entities not present anywhere in retrieved evidence
+                proper_nouns = re.findall(r"\b[A-Z][a-z]{3,}\b", s_clean)
+                EXCLUDED_WORDS = {"The", "This", "These", "That", "There", "However", "Furthermore", "In", "On", "At", "Although", "While", "Its", "His", "Her", "Their", "According", "Based", "From", "Here"}
+                foreign_entities = []
+                for pn in proper_nouns:
+                    if pn in EXCLUDED_WORDS:
+                        continue
+                    if pn.lower() not in all_evidence_words and pn.lower() not in q_words:
+                        foreign_entities.append(pn)
+
+                # 3. Verify citations
+                cites = [int(m) for m in re.findall(r"\[(\d+)\]", s_clean)]
+                if cites:
+                    has_support = False
+                    for c_idx in cites:
+                        if 1 <= c_idx <= len(selected_chunks):
+                            target_passage = selected_chunks[c_idx - 1].passage_text.lower()
+                            s_content_words = set(re.findall(r"\b[a-zA-Z]{4,}\b", s_lower)) - NLPQueryParser.STOPWORDS_CHUNKS
+                            if s_content_words:
+                                match_count = sum(1 for w in s_content_words if w in target_passage)
+                                if match_count / len(s_content_words) >= 0.15 or match_count >= 2:
+                                    has_support = True
+                                    break
+                    if has_support:
+                        stats["claims_supported"] += 1
+                    else:
+                        # Citations do not support this sentence - strip false citation
+                        s_clean = re.sub(r"\[\d+\]", "", s_clean).strip()
+                        s_clean = re.sub(r"\s+([,\.])", r"\1", s_clean)
+                        stats["citations_stripped"] += 1
+
+                # If sentence introduces foreign entities not found anywhere in evidence and has no citation support, drop it
+                if len(foreign_entities) >= 1 and not cites:
+                    stats["unsupported_claims_removed"] += 1
+                    continue
+
+                valid_sentences.append(s_clean)
+
+            if valid_sentences:
+                verified_paragraphs.append(" ".join(valid_sentences))
+
+        final_text = "\n\n".join(verified_paragraphs).strip()
+        return final_text, stats
 
 
 class AnswerOrchestrator:
@@ -68,6 +172,18 @@ class AnswerOrchestrator:
             request = request.model_copy(update={
                 "max_evidence_passages": min(request.max_evidence_passages * 2, 8),
                 "top_k_per_document": min(request.top_k_per_document + 2, 10),
+            })
+
+        # Adaptive complexity detection
+        complexity_res = AdaptiveQueryAnalyzer.analyze_complexity(question)
+        logger.info("[Stage 7] Adaptive complexity: %s (clauses=%d, requests=%d, reasons=%s)",
+                    complexity_res.complexity.value, complexity_res.clause_count,
+                    complexity_res.interrogative_count, complexity_res.reasons)
+
+        if settings.ADAPTIVE_RETRIEVAL_ENABLED and complexity_res.complexity in (QueryComplexity.MEDIUM, QueryComplexity.COMPLEX):
+            request = request.model_copy(update={
+                "max_evidence_passages": max(request.max_evidence_passages, 6),
+                "top_k_per_document": max(request.top_k_per_document, 6),
             })
 
         diagnostics = RetrievalDiagnostics(
@@ -160,6 +276,12 @@ class AnswerOrchestrator:
                             target_docs.add(re.sub(r"\bdynasty\b", "Empire", e_clean, flags=re.IGNORECASE).strip())
                             target_docs.add(re.sub(r"\bdynasty\b", "Kingdom", e_clean, flags=re.IGNORECASE).strip())
 
+        # Add target articles from adaptive query decomposition
+        if settings.ADAPTIVE_RETRIEVAL_ENABLED and complexity_res.target_articles:
+            for art in complexity_res.target_articles:
+                if art:
+                    target_docs.add(art)
+
         STOPWORD_DOCS = {
             "list", "what", "who", "where", "when", "why", "how", "which",
             "name", "names", "tell", "show", "give", "explain", "describe",
@@ -230,12 +352,23 @@ class AnswerOrchestrator:
         else:
             async with session_factory() as session:
                 try:
-                    retrieved_chunks = await self.hybrid_retrieval.retrieve(
-                        question=question,
-                        page_ids=page_ids,
-                        top_k=settings.HYBRID_TOP_K,
-                        session=session,
-                    )
+                    if settings.ADAPTIVE_RETRIEVAL_ENABLED and complexity_res.complexity in (QueryComplexity.MEDIUM, QueryComplexity.COMPLEX):
+                        sub_queries = [s.retrieval_query for s in complexity_res.subqueries]
+                        all_queries = [question] + [sq for sq in sub_queries if sq.lower() != question.lower()]
+                        retrieved_chunks = await self.hybrid_retrieval.retrieve_multi_query(
+                            queries=all_queries[: settings.MAX_SUBQUERIES_PER_COMPLEX_QUERY + 1],
+                            page_ids=page_ids,
+                            top_k=settings.HYBRID_TOP_K * 2,
+                            session=session,
+                            entity_boosts=complexity_res.primary_entities,
+                        )
+                    else:
+                        retrieved_chunks = await self.hybrid_retrieval.retrieve(
+                            question=question,
+                            page_ids=page_ids,
+                            top_k=settings.HYBRID_TOP_K,
+                            session=session,
+                        )
                 except Exception as e:
                     logger.error("Hybrid retrieval failed: %s", e)
         retrieval_ms = round((time.perf_counter() - t_ret_start) * 1000, 2)
@@ -302,7 +435,21 @@ class AnswerOrchestrator:
                 seen_texts.add(snippet_key)
                 merged_chunks.append(rc)
 
-        selected_chunks = merged_chunks[: request.max_evidence_passages]
+        # Select slotted, non-redundant passages with 3-shingle deduplication
+        if settings.ADAPTIVE_RETRIEVAL_ENABLED and complexity_res.complexity in (QueryComplexity.MEDIUM, QueryComplexity.COMPLEX):
+            selected_chunks = EvidencePacker.pack_slotted_evidence(
+                subqueries=complexity_res.subqueries,
+                candidate_chunks=merged_chunks,
+                max_passages=request.max_evidence_passages,
+                primary_entities=complexity_res.primary_entities,
+            )
+        else:
+            selected_chunks = EvidencePacker.pack_slotted_evidence(
+                subqueries=[],
+                candidate_chunks=merged_chunks,
+                max_passages=request.max_evidence_passages,
+                primary_entities=complexity_res.primary_entities,
+            )
         diagnostics.passages_sent_to_llm = len(selected_chunks)
 
         # Build SourceReference models
@@ -360,6 +507,29 @@ class AnswerOrchestrator:
         )
         if selected_chunks and sufficiency_status in ("INSUFFICIENT", "UNKNOWN"):
             sufficiency_status = "SUFFICIENT"
+
+        # Adaptive evidence coverage assessment
+        if settings.ADAPTIVE_RETRIEVAL_ENABLED and complexity_res.complexity in (QueryComplexity.MEDIUM, QueryComplexity.COMPLEX):
+            cov_result = EvidenceCoverageAssessor.assess_coverage(
+                subqueries=complexity_res.subqueries,
+                candidate_chunks=selected_chunks,
+            )
+            diagnostics.query_complexity = complexity_res.complexity.value
+            diagnostics.subqueries_generated = [s.retrieval_query for s in complexity_res.subqueries]
+            diagnostics.evidence_coverage_ratio = cov_result.coverage_ratio
+            diagnostics.missing_aspects = cov_result.missing_aspects
+
+            if cov_result.overall_status == "INSUFFICIENT" or not selected_chunks:
+                sufficiency_status = "INSUFFICIENT"
+            elif cov_result.overall_status == "PARTIAL":
+                sufficiency_status = "PARTIAL"
+            elif selected_chunks:
+                sufficiency_status = "SUFFICIENT"
+        else:
+            diagnostics.query_complexity = "SIMPLE"
+            diagnostics.subqueries_generated = [question]
+            diagnostics.evidence_coverage_ratio = 1.0 if selected_chunks else 0.0
+            diagnostics.missing_aspects = []
 
         # Intent fields
         q_type = (
@@ -439,6 +609,63 @@ class AnswerOrchestrator:
 
             if answer_text and answer_text[0].islower():
                 answer_text = answer_text[0].upper() + answer_text[1:]
+
+            # 4. Clean abrupt incomplete sentences / mid-sentence truncation
+            trimmed = answer_text.rstrip()
+            if trimmed and not trimmed.endswith((".", "!", "?", ':"', '."', "!'", "?'")):
+                lines = trimmed.split("\n")
+                last_line = lines[-1].strip()
+                if not last_line.endswith((".", "!", "?", ":")):
+                    sentences = re.split(r"(?<=[.!?])\s+", last_line)
+                    if len(sentences) > 1 and not sentences[-1].strip().endswith((".", "!", "?")):
+                        lines[-1] = " ".join(sentences[:-1]).strip()
+                        answer_text = "\n".join(lines).strip()
+                    elif len(lines) > 1 and not last_line.endswith((".", "!", "?")):
+                        answer_text = "\n".join(lines[:-1]).strip()
+
+            # 5. Citation verification: ensure citations point only to valid retrieved passage indexes
+            max_ref_idx = len(selected_chunks)
+            if max_ref_idx > 0:
+                def _clamp_or_remove_cite(match: re.Match) -> str:
+                    idx_val = int(match.group(1))
+                    if 1 <= idx_val <= max_ref_idx:
+                        return f"[{idx_val}]"
+                    return ""
+                answer_text = re.sub(r"\[(\d+)\]", _clamp_or_remove_cite, answer_text)
+                answer_text = re.sub(r"\s+([,\.])", r"\1", answer_text)
+
+            # 6. Repetition verification: deduplicate near-identical consecutive sentences (Jaccard >= 0.80)
+            def _clean_repetitive_sentences(text: str) -> str:
+                paragraphs = text.split("\n\n")
+                clean_paragraphs = []
+                for p in paragraphs:
+                    sentences = re.split(r"(?<=[.!?])\s+", p.strip())
+                    clean_s = []
+                    prev_tokens = set()
+                    for s in sentences:
+                        toks = set(re.findall(r"\b[a-zA-Z]{3,}\b", s.lower()))
+                        if toks and prev_tokens:
+                            overlap = len(toks & prev_tokens) / len(toks | prev_tokens)
+                            if overlap >= 0.80:
+                                continue
+                        clean_s.append(s)
+                        if toks:
+                            prev_tokens = toks
+                    clean_paragraphs.append(" ".join(clean_s))
+                return "\n\n".join(clean_paragraphs)
+
+            answer_text = _clean_repetitive_sentences(answer_text)
+
+            # 7. Claim-level verification: enforce evidence grounding and drop off-topic/ungrounded claims
+            answer_text, claim_stats = ClaimVerifier.verify_and_clean_answer(
+                answer_text=answer_text,
+                selected_chunks=selected_chunks,
+                question=question,
+            )
+            diagnostics.claims_verified = claim_stats["claims_verified"]
+            diagnostics.claims_supported = claim_stats["claims_supported"]
+            diagnostics.unsupported_claims_removed = claim_stats["unsupported_claims_removed"]
+            diagnostics.citations_stripped = claim_stats["citations_stripped"]
             status = llm_result.status
             llm_load_ms = llm_result.load_duration_ms
             llm_pe_ms = llm_result.prompt_eval_duration_ms
