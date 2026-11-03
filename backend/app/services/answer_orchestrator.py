@@ -33,6 +33,7 @@ logger = logging.getLogger("nexia.orchestrator")
 
 
 from app.retrieval.passage_retriever import PassageRetriever
+from app.retrieval.nlp_query_parser import NLPQueryParser
 from app.schemas.retrieval import PassageRetrievalRequest
 
 
@@ -58,6 +59,16 @@ class AnswerOrchestrator:
         t_req_start = time.perf_counter()
         question = request.question.strip()
         logger.info(">>> [Stage 7] Starting pipeline for question: '%s'", question)
+
+        # Detect listing/enumeration queries up-front so we can widen limits early
+        _is_list_query = NLPQueryParser.is_list_question(question)
+        if _is_list_query:
+            logger.info("[Stage 7] List/enumeration query detected — widening passage limits")
+            # Override request limits: more passages, higher top_k
+            request = request.model_copy(update={
+                "max_evidence_passages": min(request.max_evidence_passages * 2, 8),
+                "top_k_per_document": min(request.top_k_per_document + 2, 10),
+            })
 
         diagnostics = RetrievalDiagnostics(
             embedding_model=settings.EMBEDDING_MODEL,
@@ -131,13 +142,16 @@ class AnswerOrchestrator:
                     terms = getattr(evidence_package.question_intent, "retrieval_terms", []) or []
                     for e in evidence_package.question_intent.entities:
                         e_clean = e.normalized_text
-                        target_docs.add(e_clean)
                         if office != "leaders":
                             target_docs.add(f"List of {office} of {e_clean}")
                             target_docs.add(f"{office} of {e_clean}")
                     for t in terms[:4]:
                         if t and len(t.split()) <= 6:
                             target_docs.add(t)
+                    # Only fall back to generic realm if no list-specific title was identified
+                    if not target_docs:
+                        for e in evidence_package.question_intent.entities:
+                            target_docs.add(e.normalized_text)
                 elif rel.type == "FOUNDED_BY":
                     for e in evidence_package.question_intent.entities:
                         e_clean = e.normalized_text
@@ -295,6 +309,16 @@ class AnswerOrchestrator:
         source_refs: List[SourceReference] = []
         passages_for_prompt: List[Dict] = []
 
+        # Detect if this is an enumeration/listing query — needs higher word cap per passage
+        _is_list_query = bool(
+            NLPQueryParser.is_list_question(question)
+            or evidence_package.question_intent and getattr(
+                evidence_package.question_intent.relation, "type", ""
+            ) == "OFFICE_HOLDERS_OF"
+        )
+        # For list queries allow up to 400 words per passage; factoid queries stay at 120
+        _passage_word_cap = 400 if _is_list_query else 120
+
         for c in selected_chunks:
             source_refs.append(
                 SourceReference(
@@ -307,11 +331,12 @@ class AnswerOrchestrator:
                     retrieval_method=c.retrieval_method,
                 )
             )
-            # Bound passage text sent to LLM to prevent prompt token bloat on CPU
+            # Bound passage text sent to LLM — higher cap for list queries
             words = c.passage_text.strip().split()
-            bounded_text = " ".join(words[:120]) if len(words) > 120 else c.passage_text.strip()
-            if len(words) > 120:
-                bounded_text += "..."
+            if len(words) > _passage_word_cap:
+                bounded_text = " ".join(words[:_passage_word_cap]) + "..."
+            else:
+                bounded_text = c.passage_text.strip()
 
             passages_for_prompt.append(
                 {
@@ -379,15 +404,39 @@ class AnswerOrchestrator:
         resp_tokens = None
 
         try:
-            llm_result = await self.llm_adapter.generate_answer(prompt_ctx)
+            # For list queries boost num_predict to 512 (ample for 50+ list items, fast on CPU)
+            if _is_list_query:
+                llm_result = await self.llm_adapter.generate_answer(
+                    prompt_ctx, num_predict_override=512
+                )
+            else:
+                llm_result = await self.llm_adapter.generate_answer(prompt_ctx)
             answer_text = llm_result.answer_text
-            # Clean any leading meta-phrasing or robotic formulas from LLM output
+            # 1. Clean introductory meta list headings e.g.:
+            # "Here is a complete list of the Presidents of India, as documented in the provided evidence:" -> "Presidents of India:"
             answer_text = re.sub(
-                r"^(?:According to the provided (?:document|documents|text|passages?)|Based on the provided (?:document|documents|text|passages?)|The provided text (?:states|defines|describes|indicates|explains)|The passage states that)\s*[:,]?\s*",
+                r"^(?:Here is (?:a|the) (?:complete )?list of (?:the )?([a-zA-Z\s]+?)[,\s]*(?:as (?:documented|presented|stated|shown|found|recorded|outlined) in (?:the )?(?:provided )?evidence|as per (?:the )?(?:evidence|wikipedia|text)|according to (?:the )?(?:evidence|wikipedia|text))?\s*[:]\s*)",
+                r"\1:\n\n",
+                answer_text,
+                flags=re.IGNORECASE,
+            ).strip()
+
+            # 2. Clean leading robotic meta-openers e.g. "According to the provided document...", "As per evidence..."
+            answer_text = re.sub(
+                r"^(?:According to (?:the )?(?:provided )?(?:document|documents|text|passages?|evidence|wikipedia)|Based on (?:the )?(?:provided )?(?:document|documents|text|passages?|evidence|wikipedia)|As per (?:the )?(?:provided )?(?:document|documents|text|passages?|evidence|wikipedia)|As for the (?:given |provided )?(?:evidence|documents?|text)|In the provided (?:evidence|documents?|text)|From the provided (?:evidence|documents?|text)|The provided text (?:states|defines|describes|indicates|explains)|The passage states that)\s*[:,]?\s*",
                 "",
                 answer_text,
                 flags=re.IGNORECASE,
             ).strip()
+
+            # 3. Clean inline meta-phrasing e.g. ", as documented in the provided evidence" or ", as per evidence"
+            answer_text = re.sub(
+                r"[,\s]*(?:as (?:documented|presented|stated|shown|found|recorded) in (?:the )?(?:provided )?evidence|as per (?:the )?(?:evidence|wikipedia|provided document|documents|text)|as for the (?:given |provided )?evidence|according to (?:the )?(?:provided )?evidence)\s*",
+                " ",
+                answer_text,
+                flags=re.IGNORECASE,
+            ).strip()
+
             if answer_text and answer_text[0].islower():
                 answer_text = answer_text[0].upper() + answer_text[1:]
             status = llm_result.status

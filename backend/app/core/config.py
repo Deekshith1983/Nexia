@@ -30,12 +30,12 @@ class Settings(BaseSettings):
 
     # LLM Settings (gemma3:4b CPU Optimized)
     LLM_MODEL: str = "gemma3:4b"
-    LLM_TIMEOUT_SECONDS: int = 180
+    LLM_TIMEOUT_SECONDS: int = 360
     LLM_MAX_EVIDENCE_PASSAGES: int = 3
     LLM_TEMPERATURE: float = 0.1
     LLM_NUM_THREADS: int = 6       # Matches Ryzen 5 physical CPU cores
-    LLM_NUM_CTX: int = 2048        # Bounded context window for RAM bandwidth optimization
-    LLM_NUM_PREDICT: int = 128     # Bounded answer token limit
+    LLM_NUM_CTX: int = 6144        # Expanded to hold list-type evidence passages fully
+    LLM_NUM_PREDICT: int = 768     # Allow complete list-style answers without truncation
     LLM_KEEP_ALIVE: str = "30m"    # Keep model resident in RAM
 
     # Retrieval Tuning

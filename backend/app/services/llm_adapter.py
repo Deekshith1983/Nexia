@@ -69,9 +69,21 @@ class OllamaLLMAdapter:
             logger.warning("LLM health check failed: %s", e)
             return False
 
-    async def generate_answer(self, context: PromptContext) -> LLMGenerationResult:
-        """Generate a grounded answer for the provided context."""
+    async def generate_answer(
+        self,
+        context: PromptContext,
+        num_predict_override: Optional[int] = None,
+    ) -> LLMGenerationResult:
+        """Generate a grounded answer for the provided context.
+
+        Args:
+            context: The prompt context with passages and question.
+            num_predict_override: If set, overrides the default num_predict
+                token budget (use for list/enumeration queries).
+        """
         prompt_text = build_answer_prompt(context)
+
+        num_predict = num_predict_override if num_predict_override is not None else settings.LLM_NUM_PREDICT
 
         payload = {
             "model": self.model,
@@ -81,7 +93,7 @@ class OllamaLLMAdapter:
             "options": {
                 "num_thread": settings.LLM_NUM_THREADS,
                 "num_ctx": settings.LLM_NUM_CTX,
-                "num_predict": settings.LLM_NUM_PREDICT,
+                "num_predict": num_predict,
                 "temperature": self.temperature,
             },
             "keep_alive": settings.LLM_KEEP_ALIVE,

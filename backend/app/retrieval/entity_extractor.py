@@ -342,10 +342,10 @@ class EntityExtractor:
                         raw_ent = cleaned_realm
                         norm_ent = cls.normalize_entity_text(cleaned_realm)
                         custom_terms = [
-                            f"{category} of {norm_ent}",
-                            f"{category} in {norm_ent}",
                             f"List of {category} of {norm_ent}",
                             f"List of {category} in {norm_ent}",
+                            f"{category} of {norm_ent}",
+                            f"{category} in {norm_ent}",
                             norm_ent,
                             category,
                             "reign",
@@ -418,7 +418,15 @@ class EntityExtractor:
                         retrieval_terms=retrieval_terms,
                     )
 
-        # 2. Capitalized Proper Noun Chunks fallback (Multi-entity detection)
+        # 2. NLP Semantic Intent Analysis via spaCy (Tier 2: flexible syntax, dependency & NER parsing)
+        try:
+            nlp_stage4 = NLPQueryParser.analyze_stage4_intent(cleaned_q)
+            if nlp_stage4 is not None:
+                return nlp_stage4
+        except Exception:
+            pass
+
+        # 3. Capitalized Proper Noun Chunks fallback (Multi-entity detection)
         proper_noun_chunks = re.findall(
             r"\b[A-Z][a-z]+(?:\s+(?:of|and|the|for|in|at)\s+[A-Z][a-z]+|\s+[A-Z][a-z]+)*\b",
             cleaned_q,
@@ -549,6 +557,12 @@ class EntityExtractor:
             "narendra damodardas modi": "Narendra Modi",
             "prime ministers of india": "List of prime ministers of India",
             "prime minister of india": "List of prime ministers of India",
+            "presidents of india": "List of presidents of India",
+            "president of india": "List of presidents of India",
+            "rulers of maratha empire": "List of Maratha rulers",
+            "states of india": "States and union territories of India",
+            "countries in europe": "List of sovereign states and dependent territories in Europe",
+            "countries of europe": "List of sovereign states and dependent territories in Europe",
         }
         lower_norm = normalized.lower()
         if lower_norm in ALIASES:

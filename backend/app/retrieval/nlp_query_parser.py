@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 import spacy
 from spacy.language import Language
 
-from app.schemas.retrieval import EntityItem
+from app.schemas.retrieval import EntityItem, Stage4StructuredQuery, RelationshipIntent
 
 logger = logging.getLogger(__name__)
 
@@ -183,3 +183,237 @@ class NLPQueryParser:
             is_follow_up=is_follow_up,
             anaphoric_pronouns=detected_pronouns,
         )
+
+    @classmethod
+    def analyze_stage4_intent(cls, question: str) -> Optional[Stage4StructuredQuery]:
+        """Syntactic and dependency-based Stage 4 intent extraction using spaCy.
+
+        Resolves relationship archetypes, directional roles, and named entities
+        without relying on rigid regex string templates.
+        """
+        from app.retrieval.entity_extractor import EntityExtractor
+
+        cleaned_q = question.strip()
+        cleaned_q = re.sub(r"\bthr\b", "the", cleaned_q, flags=re.IGNORECASE)
+        cleaned_q = re.sub(r"\bteh\b", "the", cleaned_q, flags=re.IGNORECASE)
+        cleaned_q = re.sub(r"\bthier\b", "their", cleaned_q, flags=re.IGNORECASE)
+        q_norm = re.sub(r"[\?\.\!]+$", "", cleaned_q).strip()
+
+        nlp = cls.get_nlp()
+        doc = nlp(q_norm)
+        lemmas = [t.lemma_.lower() for t in doc]
+        tokens_lower = [t.text.lower() for t in doc]
+        text_lower = q_norm.lower()
+
+        rel_type: Optional[str] = None
+        direction = "OUTGOING"
+        expected_type = "PERSON"
+        q_type = "RELATIONSHIP"
+        rel_terms: List[str] = []
+
+        # 1. Classify Relationship Intent via Lemmatized Syntactic Actions
+        # DIFFERENCE / COMPARISON
+        if any(l in ["differ", "compare", "contrast"] for l in lemmas) or any(
+            t in ["difference", "comparison", "contrast", "versus", "vs"] for t in tokens_lower
+        ):
+            rel_type = "DIFFERENCE_COMPARISON"
+            direction = "BIDIRECTIONAL"
+            expected_type = "COMPARISON"
+            q_type = "MULTI_ENTITY_COMPARISON"
+            rel_terms = ["difference", "comparison", "contrast", "versus", "vs"]
+
+        # BILATERAL RELATIONS
+        elif any(l in ["relate", "connect", "link"] for l in lemmas) or any(
+            t in ["relationship", "relations", "connection", "history", "bilateral"] for t in tokens_lower
+        ):
+            rel_type = "BILATERAL_RELATIONS"
+            direction = "BIDIRECTIONAL"
+            expected_type = "RELATIONSHIP"
+            q_type = "MULTI_ENTITY_RELATION"
+            rel_terms = ["relationship", "relations", "connection", "history", "bilateral"]
+
+        # FATHER OF THE NATION
+        elif "father of the nation" in text_lower or "father of nation" in text_lower or "national founder" in text_lower:
+            rel_type = "FATHER_OF_NATION_OF"
+            direction = "INCOMING"
+            expected_type = "PERSON"
+            rel_terms = ["father of the nation", "father of nation", "rashtrapita", "national founder", "mahatma gandhi"]
+
+        # ORDINAL OFFICE HOLDER (3rd prime minister, first president, etc.)
+        elif any(
+            t.ent_type_ == "ORDINAL" or t.text.lower() in [
+                "first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth",
+                "1st", "2nd", "3rd", "4th", "5th", "6th", "7th", "8th", "9th", "10th"
+            ]
+            for t in doc
+        ) and any(
+            k in text_lower for k in ["prime minister", "president", "king", "emperor", "ruler", "monarch", "chancellor"]
+        ):
+            rel_type = "ORDINAL_OFFICE_HOLDER"
+            direction = "INCOMING"
+            expected_type = "PERSON"
+            rel_terms = ["prime minister", "office", "term", "order", "tenure"]
+
+        # OFFICE HOLDERS / CATEGORY LISTING
+        elif any(l in ["list", "name", "enumerate", "give", "show", "tell"] for l in lemmas) or (
+            any(t in ["who", "what"] for t in tokens_lower)
+            and any(
+                k in text_lower for k in [
+                    "states", "countries", "districts", "rulers", "presidents",
+                    "monarchs", "kings", "emperors", "prime ministers", "provinces"
+                ]
+            )
+        ):
+            rel_type = "OFFICE_HOLDERS_OF"
+            direction = "INCOMING"
+            expected_type = "ENTITY_LIST"
+            rel_terms = ["list", "table", "states", "territories", "countries", "office", "term", "birth place", "rule period"]
+
+        # SUCCESSION (succeeded, successor, ruler after...)
+        elif any(l in ["succeed"] for l in lemmas) or any(
+            t in ["successor", "succession"] for t in tokens_lower
+        ) or (
+            "after" in tokens_lower and any(
+                r in tokens_lower for r in ["ruler", "king", "emperor", "person", "leader", "who"]
+            )
+        ):
+            rel_type = "SUCCESSOR_OF"
+            direction = "OUTGOING"
+            expected_type = "PERSON"
+            rel_terms = ["successor", "succeeded", "succeeding", "succession", "heir", "after"]
+
+        # PREDECESSOR (preceded, predecessor, ruler before...)
+        elif any(l in ["precede"] for l in lemmas) or any(
+            t in ["predecessor", "previous"] for t in tokens_lower
+        ) or (
+            "before" in tokens_lower and any(
+                r in tokens_lower for r in ["ruler", "king", "emperor", "person", "leader", "who"]
+            )
+        ):
+            rel_type = "PREDECESSOR_OF"
+            direction = "INCOMING"
+            expected_type = "PERSON"
+            rel_terms = ["predecessor", "preceded", "preceding", "before", "previous"]
+
+        # FOUNDED BY (founded, founder, established by, created by...)
+        elif any(l in ["found", "establish", "create", "start"] for l in lemmas) or any(
+            t in ["founder", "co-founder", "creator", "establisher"] for t in tokens_lower
+        ):
+            rel_type = "FOUNDED_BY"
+            direction = "INCOMING"
+            expected_type = "PERSON"
+            rel_terms = ["founded", "founder", "co-founder", "established", "creator", "started"]
+
+        # BORN IN (born, birthplace...)
+        elif any(l in ["bear", "born"] for l in lemmas) or "birthplace" in text_lower or "born in" in text_lower:
+            rel_type = "BORN_IN"
+            direction = "OUTGOING"
+            expected_type = "LOCATION"
+            rel_terms = ["born", "birthplace", "native", "place of birth"]
+
+        # WORKED WITH (worked with, partnered with, collaborated with...)
+        elif any(l in ["work", "partner", "collaborate", "associate"] for l in lemmas):
+            rel_type = "WORKED_WITH"
+            direction = "BIDIRECTIONAL"
+            expected_type = "PERSON"
+            rel_terms = ["worked with", "partner", "colleague", "collaborator", "associated"]
+
+        if not rel_type:
+            return None
+
+        # 2. Extract Named Entities using spaCy NER + Noun Chunks
+        OFFICE_FILTER = {
+            "prime minister", "president", "king", "emperor", "ruler", "monarch",
+            "successor", "predecessor", "founder", "states", "countries", "districts",
+            "rule period", "difference", "relationship", "father", "nation", "office"
+        }
+        extracted_names: List[str] = []
+        seen = set()
+
+        for ent in doc.ents:
+            if ent.label_ in ["PERSON", "GPE", "ORG", "LOC", "NORP"] and ent.text.lower() not in cls.STOPWORDS_CHUNKS:
+                c_text = ent.text.strip(".,!? ")
+                low = c_text.lower()
+                if c_text and low not in seen and low not in OFFICE_FILTER:
+                    seen.add(low)
+                    extracted_names.append(c_text)
+
+        for chunk in doc.noun_chunks:
+            c_text = chunk.text.strip(".,!? ")
+            c_clean = re.sub(r"^(?:the|a|an|their|his|her|its)\s+", "", c_text, flags=re.IGNORECASE).strip()
+            low = c_clean.lower()
+            if low not in seen and low not in cls.STOPWORDS_CHUNKS and low not in OFFICE_FILTER and len(c_clean) > 2:
+                if low in EntityExtractor.KNOWN_COUNTRIES or any(term in low for term in ["empire", "dynasty", "kingdom", "company", "inc", "corp", "university", "institute"]):
+                    seen.add(low)
+                    extracted_names.append(c_clean)
+
+        if not extracted_names:
+            return None
+
+        # 3. Assemble Entities with Roles
+        entities: List[EntityItem] = []
+        if rel_type in ["BILATERAL_RELATIONS", "DIFFERENCE_COMPARISON"] and len(extracted_names) >= 2:
+            ent1 = extracted_names[0]
+            ent2 = extracted_names[1]
+            norm1 = EntityExtractor.normalize_entity_text(ent1)
+            norm2 = EntityExtractor.normalize_entity_text(ent2)
+            entities = [
+                EntityItem(text=ent1, normalized_text=norm1, type=EntityExtractor._infer_entity_type(norm1), role="SUBJECT_A"),
+                EntityItem(text=ent2, normalized_text=norm2, type=EntityExtractor._infer_entity_type(norm2), role="SUBJECT_B"),
+            ]
+            retrieval_terms = [norm1, norm2] + rel_terms
+        else:
+            primary = extracted_names[0]
+            norm_primary = EntityExtractor.normalize_entity_text(primary)
+            entities = [
+                EntityItem(text=primary, normalized_text=norm_primary, type=EntityExtractor._infer_entity_type(norm_primary), role="SUBJECT")
+            ]
+            if rel_type == "OFFICE_HOLDERS_OF":
+                # Find category noun (states, presidents, rulers, etc.)
+                cat = "rulers"
+                for kw in ["states", "countries", "districts", "rulers", "presidents", "monarchs", "kings", "emperors", "prime ministers"]:
+                    if kw in text_lower:
+                        cat = kw
+                        break
+                retrieval_terms = [
+                    f"List of {cat} of {norm_primary}",
+                    f"List of {cat} in {norm_primary}",
+                    f"{cat} of {norm_primary}",
+                    f"{cat} in {norm_primary}",
+                    norm_primary,
+                    cat,
+                ] + rel_terms
+            elif rel_type == "ORDINAL_OFFICE_HOLDER":
+                retrieval_terms = [norm_primary, f"List of {norm_primary}"] + rel_terms
+            else:
+                retrieval_terms = [norm_primary] + rel_terms
+
+        return Stage4StructuredQuery(
+            raw_question=question,
+            question_type=q_type,
+            entities=entities,
+            relation=RelationshipIntent(
+                type=rel_type,
+                direction=direction,
+                target_role="TARGET_OBJECT" if q_type == "RELATIONSHIP" else "SUBJECT_B",
+                relation_terms=rel_terms,
+            ),
+            expected_answer_type=expected_type,
+            retrieval_terms=retrieval_terms,
+        )
+
+    @classmethod
+    def is_list_question(cls, question: str) -> bool:
+        """Detect if the user query is asking for an enumeration, list, or inventory."""
+        q_low = question.lower().strip()
+        LIST_PREFIXES = ("list", "name", "give", "enumerate", "what are", "who are", "show me", "tell me", "mention")
+        if any(q_low.startswith(p) for p in LIST_PREFIXES):
+            return True
+        try:
+            doc = cls.get_nlp()(question.strip())
+            for token in doc[:3]:
+                if token.pos_ == "VERB" and token.lemma_ in ["list", "name", "enumerate", "give", "mention"]:
+                    return True
+        except Exception:
+            pass
+        return False

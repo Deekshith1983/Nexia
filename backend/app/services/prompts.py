@@ -2,6 +2,7 @@
 
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel
+import re
 
 
 class PromptContext(BaseModel):
@@ -17,14 +18,24 @@ class PromptContext(BaseModel):
 
 
 SYSTEM_PROMPT = """You are Nexia, an authoritative, knowledgeable conversational assistant.
-Answer the user's question directly, fluently, and conversationally in complete sentences.
+Answer the user's question directly, fluently, and completely.
 
 CRITICAL TONE RULES:
-1. NEVER say "According to the provided document", "Based on the provided passages", "The provided text defines...", "The passage states", "As mentioned in the source", or any similar meta-language referencing the prompt or text. Speak directly as an expert stating facts.
+1. NEVER use meta-language. NEVER say "According to the provided document", "Based on the provided passages", "as documented in the provided evidence", "as per evidence", "as per Wikipedia", "as for the given evidence", "as presented in the evidence", "in the provided evidence", "The provided text defines...", "The passage states", or ANY mention of evidence, passages, documents, or Wikipedia. Speak directly as an authoritative expert stating facts.
 2. Ground all facts in the evidence and attach citations like [1], [2] at the end of relevant sentences.
 3. Do NOT fabricate information not present in the evidence.
-4. Only if the evidence passages completely lack information to answer the question, begin your reply with:
+4. LISTING RULE: If the user asks you to list, enumerate, or name items, output the COMPLETE list — do not stop early, do not summarize, do not say "and others". Every item from the evidence must appear. Begin directly with a heading (e.g. "Presidents of India:") or start the numbered list immediately. Do NOT write introductory filler like "Here is a list of... as documented in the provided evidence".
+5. COMPLETENESS RULE: Never end a sentence mid-way. Always complete every sentence you start.
+6. Only if the evidence passages completely lack information to answer the question, begin your reply with:
 INSUFFICIENT_EVIDENCE: <concise reason>"""
+
+
+from app.retrieval.nlp_query_parser import NLPQueryParser
+
+
+def _is_list_question(question: str) -> bool:
+    """Detect if the question is asking for an enumeration or listing."""
+    return NLPQueryParser.is_list_question(question)
 
 
 def build_answer_prompt(ctx: PromptContext) -> str:
@@ -51,6 +62,16 @@ def build_answer_prompt(ctx: PromptContext) -> str:
 
     entities_str = ", ".join(ctx.entities) if ctx.entities else "None detected"
 
+    # Inject a list-specific instruction when the question is an enumeration
+    list_instruction = ""
+    if _is_list_question(ctx.question):
+        list_instruction = (
+            "\nSPECIAL INSTRUCTION: The user is asking for a COMPLETE LIST. "
+            "Output every single item found in the evidence as a numbered list. "
+            "Do NOT say 'and others', 'etc.', or truncate the list in any way. "
+            "Every item must appear. Complete every sentence fully before stopping.\n"
+        )
+
     prompt_body = f"""USER QUESTION: {ctx.question}
 
 QUESTION INTENT:
@@ -65,10 +86,12 @@ KNOWN CONFLICTS OR UNCERTAINTIES:
 {conflicts_str}
 
 SUFFICIENCY RATING (from Nexia deterministic analysis): {ctx.sufficiency_rating}
-
+{list_instruction}
 INSTRUCTIONS:
-Provide a clear, authoritative, conversational answer in complete sentences.
-DO NOT use phrases such as "According to the provided document", "Based on the provided text", or "The passage states". State the answer directly and cite sources with [1], [2].
+Provide a clear, authoritative, complete answer.
+If the question asks for a list: output a numbered list with EVERY item — do not summarize or truncate. Start directly with the list or a clean heading (e.g. "Presidents of India:").
+If the question is factual: answer in complete sentences.
+DO NOT use phrases such as "According to the provided document", "Based on the provided text", "as documented in the provided evidence", "as per evidence", "as per Wikipedia", or "The passage states". State the answer directly and cite sources with [1], [2].
 Only if the passages do not contain the answer, reply with:
 INSUFFICIENT_EVIDENCE: <brief reason why the evidence is insufficient>
 """

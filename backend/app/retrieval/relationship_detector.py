@@ -357,9 +357,23 @@ class RelationshipDetector:
 
 
     @classmethod
+    def _split_sentences(cls, text: str) -> List[str]:
+        """Split text into sentences cleanly using spaCy sentence segmentation to preserve abbreviations and titles."""
+        try:
+            from app.retrieval.nlp_query_parser import NLPQueryParser
+            nlp = NLPQueryParser.get_nlp()
+            if len(text) < 2500:
+                sents = [s.text.strip() for s in nlp(text).sents if s.text.strip()]
+                if sents:
+                    return sents
+        except Exception:
+            pass
+        return [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+
+    @classmethod
     def _synthesize_sentence(cls, passage_text: str, start_pos: int, end_pos: int) -> str:
         """Extract the exact containing sentence around the matched match span."""
-        sentences = re.split(r"(?<=[.!?])\s+", passage_text)
+        sentences = cls._split_sentences(passage_text)
         for sent in sentences:
             if passage_text[start_pos:end_pos].strip() in sent or any(
                 tok in sent for tok in passage_text[start_pos:end_pos].split() if len(tok) > 3
@@ -370,7 +384,7 @@ class RelationshipDetector:
     @classmethod
     def _synthesize_cross_summary(cls, subject: str, relation: str, object_entity: str, passage_text: str) -> str:
         """Extract or construct a clean summary sentence containing both entities."""
-        sentences = re.split(r"(?<=[.!?])\s+", passage_text)
+        sentences = cls._split_sentences(passage_text)
         sub_low = subject.lower()
         obj_low = object_entity.lower()
 

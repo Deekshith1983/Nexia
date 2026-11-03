@@ -79,6 +79,9 @@ class WikiTableParser(HTMLParser):
             if not table or len(table) < 2:
                 continue
             headers = table[0]
+            current_block: List[str] = []
+            current_word_count = 0
+
             for row in table[1:]:
                 if len(row) >= 2:
                     row_parts = []
@@ -91,9 +94,20 @@ class WikiTableParser(HTMLParser):
                                 row_parts.append(cell_val)
                         else:
                             row_parts.append(cell_val)
-                    para_text = " | ".join(row_parts)
-                    if len(para_text) > 20:
-                        paragraphs.append(para_text)
+                    row_text = " | ".join(row_parts)
+                    if len(row_text) > 20:
+                        words_in_row = len(row_text.split())
+                        # Pack rows into cohesive table blocks up to 350 words so full lists stay intact
+                        if current_word_count + words_in_row > 350 and current_block:
+                            paragraphs.append("\n".join(current_block))
+                            current_block = [row_text]
+                            current_word_count = words_in_row
+                        else:
+                            current_block.append(row_text)
+                            current_word_count += words_in_row
+
+            if current_block:
+                paragraphs.append("\n".join(current_block))
 
         unique_links = []
         for title, _ in parser.links:
@@ -213,13 +227,26 @@ class WikipediaClient:
         if "missing" in page_info or int(first_page_id) < 0:
             raise WikipediaClientError(f"Wikipedia article not found for: {title_or_pageid}")
 
-        # Check if table parsing is needed (e.g. list pages, tables stripped by explaintext)
+        # Check if table parsing is needed (e.g. list pages, administrative/ruler pages, tables stripped by explaintext)
         title = page_info.get("title", "")
         raw_extract = page_info.get("extract", "")
+        title_low = title.lower()
+        extract_low = raw_extract.lower()
+
+        TABLE_TITLE_KEYWORDS = {
+            "list", "states", "territories", "rulers", "presidents", "monarchs",
+            "prime minister", "kings", "emperors", "countries", "districts",
+            "dynasty", "cabinet", "ministers", "members", "divisions",
+            "provinces", "governors", "chancellors", "mayors", "timeline",
+        }
         needs_table = (
-            title.lower().startswith("list of")
-            or "== list ==" in raw_extract.lower()
-            or len(raw_extract) < 1500
+            any(kw in title_low for kw in TABLE_TITLE_KEYWORDS)
+            or "== list" in extract_low
+            or "== table" in extract_low
+            or "== states" in extract_low
+            or "== rulers" in extract_low
+            or "== presidents" in extract_low
+            or len(raw_extract) < 2500
         )
 
         if needs_table:
