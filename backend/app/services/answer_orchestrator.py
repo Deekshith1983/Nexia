@@ -53,6 +53,7 @@ class ClaimVerifier:
         answer_text: str,
         selected_chunks: List[Any],
         question: str,
+        missing_aspects: Optional[List[str]] = None,
     ) -> Tuple[str, Dict[str, int]]:
         """Verify each sentence in answer against cited passages; prune or qualify ungrounded claims."""
         stats = {
@@ -60,6 +61,8 @@ class ClaimVerifier:
             "claims_supported": 0,
             "unsupported_claims_removed": 0,
             "citations_stripped": 0,
+            "citations_remapped": 0,
+            "citations_attached": 0,
         }
         if not answer_text or not selected_chunks:
             return answer_text, stats
@@ -98,7 +101,7 @@ class ClaimVerifier:
 
                 # 2. Check for foreign ungrounded entities not present anywhere in retrieved evidence
                 proper_nouns = re.findall(r"\b[A-Z][a-z]{3,}\b", s_clean)
-                EXCLUDED_WORDS = {"The", "This", "These", "That", "There", "However", "Furthermore", "In", "On", "At", "Although", "While", "Its", "His", "Her", "Their", "According", "Based", "From", "Here"}
+                EXCLUDED_WORDS = {"The", "This", "These", "That", "There", "However", "Furthermore", "Moreover", "In", "On", "At", "Although", "While", "Its", "His", "Her", "Their", "According", "Based", "From", "Here", "Additionally"}
                 foreign_entities = []
                 for pn in proper_nouns:
                     if pn in EXCLUDED_WORDS:
@@ -106,14 +109,15 @@ class ClaimVerifier:
                     if pn.lower() not in all_evidence_words and pn.lower() not in q_words:
                         foreign_entities.append(pn)
 
-                # 3. Verify citations
+                # 3. Verify citations and evidence per claim
                 cites = [int(m) for m in re.findall(r"\[(\d+)\]", s_clean)]
+                s_content_words = set(re.findall(r"\b[a-zA-Z]{4,}\b", s_lower)) - NLPQueryParser.STOPWORDS_CHUNKS
+
                 if cites:
                     has_support = False
                     for c_idx in cites:
                         if 1 <= c_idx <= len(selected_chunks):
                             target_passage = selected_chunks[c_idx - 1].passage_text.lower()
-                            s_content_words = set(re.findall(r"\b[a-zA-Z]{4,}\b", s_lower)) - NLPQueryParser.STOPWORDS_CHUNKS
                             if s_content_words:
                                 match_count = sum(1 for w in s_content_words if w in target_passage)
                                 if match_count / len(s_content_words) >= 0.15 or match_count >= 2:
@@ -122,15 +126,37 @@ class ClaimVerifier:
                     if has_support:
                         stats["claims_supported"] += 1
                     else:
-                        # Citations do not support this sentence - strip false citation
-                        s_clean = re.sub(r"\[\d+\]", "", s_clean).strip()
-                        s_clean = re.sub(r"\s+([,\.])", r"\1", s_clean)
-                        stats["citations_stripped"] += 1
+                        # Cited passage doesn't match; search other retrieved passages for actual support
+                        found_remap = False
+                        for j, ch in enumerate(selected_chunks, 1):
+                            if s_content_words and sum(1 for w in s_content_words if w in ch.passage_text.lower()) >= 2:
+                                s_clean = re.sub(r"\[\d+\]", f"[{j}]", s_clean)
+                                found_remap = True
+                                stats["claims_supported"] += 1
+                                stats["citations_remapped"] += 1
+                                break
+                        if not found_remap:
+                            # Strip false citation
+                            s_clean = re.sub(r"\[\d+\]", "", s_clean).strip()
+                            s_clean = re.sub(r"\s+([,\.])", r"\1", s_clean)
+                            stats["citations_stripped"] += 1
+                            if foreign_entities:
+                                stats["unsupported_claims_removed"] += 1
+                                continue
+                else:
+                    # Require evidence per claim: if statement is a factual claim without citation, search for supporting passage
+                    if len(s_content_words) >= 3 or proper_nouns:
+                        for j, ch in enumerate(selected_chunks, 1):
+                            if sum(1 for w in s_content_words if w in ch.passage_text.lower()) >= 2:
+                                s_clean = f"{s_clean.rstrip('.')} [{j}]."
+                                stats["citations_attached"] += 1
+                                stats["claims_supported"] += 1
+                                break
 
-                # If sentence introduces foreign entities not found anywhere in evidence and has no citation support, drop it
-                if len(foreign_entities) >= 1 and not cites:
-                    stats["unsupported_claims_removed"] += 1
-                    continue
+                    # If sentence introduces foreign entities not found anywhere in evidence and has no citation support, drop it
+                    if len(foreign_entities) >= 1 and not re.search(r"\[\d+\]", s_clean):
+                        stats["unsupported_claims_removed"] += 1
+                        continue
 
                 valid_sentences.append(s_clean)
 
@@ -138,6 +164,24 @@ class ClaimVerifier:
                 verified_paragraphs.append(" ".join(valid_sentences))
 
         final_text = "\n\n".join(verified_paragraphs).strip()
+
+        # 4. Enforce abstention: If missing aspects exist and the text didn't mention abstention, append honest qualification
+        if missing_aspects:
+            final_lower = final_text.lower()
+            uncovered_aspects = []
+            for aspect in missing_aspects:
+                aspect_terms = set(re.findall(r"\b[a-zA-Z]{4,}\b", aspect.lower())) - NLPQueryParser.STOPWORDS_CHUNKS
+                already_acknowledged = any(kw in final_lower for kw in ("not documented", "no specific documentation", "does not document", "remains uncertain", "uncertainty surrounding", "uncertainties surrounding", "silent on"))
+                if not already_acknowledged or not any(term in final_lower for term in aspect_terms):
+                    uncovered_aspects.append(aspect)
+
+            if uncovered_aspects:
+                abstention_notes = "\n\n".join(
+                    f"The available evidence does not contain specific documentation regarding {asp}."
+                    for asp in uncovered_aspects
+                )
+                final_text = f"{final_text}\n\n{abstention_notes}".strip()
+
         return final_text, stats
 
 
@@ -392,27 +436,35 @@ class AnswerOrchestrator:
                     )
                     doc_titles = [r[0] for r in doc_titles_res.fetchall()]
 
+                # Decompose before retrieval: retrieve evidence separately for main question and decomposed subqueries
+                queries_to_harvest = [question]
+                if settings.ADAPTIVE_RETRIEVAL_ENABLED and complexity_res.subqueries:
+                    for sq in complexity_res.subqueries[:4]:
+                        if sq.retrieval_query.lower() != question.lower():
+                            queries_to_harvest.append(sq.retrieval_query)
+
                 for d_title in doc_titles:
-                    p_res = await self.passage_retriever.retrieve_passages(
-                        PassageRetrievalRequest(
-                            question=question,
-                            document=d_title,
-                            top_k=3,
-                        )
-                    )
-                    for idx, ep in enumerate(p_res.evidence):
-                        if ep.score >= 0.5:
-                            stage3_passages.append(
-                                RetrievedChunk(
-                                    chunk_id=-idx - 1,
-                                    document_title=ep.document_title,
-                                    source_url=f"https://en.wikipedia.org/wiki/{ep.document_title.replace(' ', '_')}",
-                                    section_title=ep.section_title,
-                                    passage_text=ep.text,
-                                    rrf_score=ep.score,
-                                    retrieval_method="bm25",
-                                )
+                    for q_harvest in queries_to_harvest:
+                        p_res = await self.passage_retriever.retrieve_passages(
+                            PassageRetrievalRequest(
+                                question=q_harvest,
+                                document=d_title,
+                                top_k=2,
                             )
+                        )
+                        for idx, ep in enumerate(p_res.evidence):
+                            if ep.score >= 0.45:
+                                stage3_passages.append(
+                                    RetrievedChunk(
+                                        chunk_id=-len(stage3_passages) - 1,
+                                        document_title=ep.document_title,
+                                        source_url=f"https://en.wikipedia.org/wiki/{ep.document_title.replace(' ', '_')}",
+                                        section_title=ep.section_title,
+                                        passage_text=ep.text,
+                                        rrf_score=ep.score,
+                                        retrieval_method="bm25",
+                                    )
+                                )
             except Exception as e:
                 logger.warning("Stage 3 BM25 passage harvesting failed: %s", e)
 
@@ -435,13 +487,14 @@ class AnswerOrchestrator:
                 seen_texts.add(snippet_key)
                 merged_chunks.append(rc)
 
-        # Select slotted, non-redundant passages with 3-shingle deduplication
+        # Select slotted, non-redundant passages with 3-shingle deduplication and relevance filtering
         if settings.ADAPTIVE_RETRIEVAL_ENABLED and complexity_res.complexity in (QueryComplexity.MEDIUM, QueryComplexity.COMPLEX):
             selected_chunks = EvidencePacker.pack_slotted_evidence(
                 subqueries=complexity_res.subqueries,
                 candidate_chunks=merged_chunks,
                 max_passages=request.max_evidence_passages,
                 primary_entities=complexity_res.primary_entities,
+                question=question,
             )
         else:
             selected_chunks = EvidencePacker.pack_slotted_evidence(
@@ -449,6 +502,7 @@ class AnswerOrchestrator:
                 candidate_chunks=merged_chunks,
                 max_passages=request.max_evidence_passages,
                 primary_entities=complexity_res.primary_entities,
+                question=question,
             )
         diagnostics.passages_sent_to_llm = len(selected_chunks)
 
@@ -561,6 +615,8 @@ class AnswerOrchestrator:
             passages=passages_for_prompt,
             conflicts=conflicts_text,
             sufficiency_rating=sufficiency_status,
+            missing_aspects=diagnostics.missing_aspects or [],
+            subqueries=diagnostics.subqueries_generated or [],
         )
         prompt_construction_ms = round((time.perf_counter() - t_prompt_start) * 1000, 2)
 
@@ -661,6 +717,7 @@ class AnswerOrchestrator:
                 answer_text=answer_text,
                 selected_chunks=selected_chunks,
                 question=question,
+                missing_aspects=diagnostics.missing_aspects or [],
             )
             diagnostics.claims_verified = claim_stats["claims_verified"]
             diagnostics.claims_supported = claim_stats["claims_supported"]

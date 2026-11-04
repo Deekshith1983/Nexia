@@ -665,6 +665,7 @@ class EvidencePacker:
         candidate_chunks: List[Any],
         max_passages: int = 6,
         primary_entities: Optional[List[str]] = None,
+        question: Optional[str] = None,
     ) -> List[Any]:
         """Pack non-redundant evidence chunks, allocating slots to distinct subquery requirements."""
         if not candidate_chunks:
@@ -679,8 +680,12 @@ class EvidencePacker:
             "postal service", "external links", "see also", "further reading",
         }
 
-        # Build vocabulary of allowed terms from subqueries and entities
+        # Build vocabulary of allowed terms from subqueries, entities, and question
         allowed_vocab: Set[str] = set()
+        if question:
+            for w in re.findall(r"\b[a-zA-Z0-9]{3,}\b", question.lower()):
+                if w not in NLPQueryParser.STOPWORDS_CHUNKS:
+                    allowed_vocab.add(w)
         for sq in subqueries:
             for w in re.findall(r"\b[a-zA-Z0-9]{3,}\b", sq.retrieval_query.lower()):
                 if w not in NLPQueryParser.STOPWORDS_CHUNKS:

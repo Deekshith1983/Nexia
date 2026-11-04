@@ -11,6 +11,7 @@ from app.retrieval.adaptive_nlp_planner import (
 )
 from app.services.answer_orchestrator import ClaimVerifier
 from app.services.hybrid_retrieval import RetrievedChunk
+from app.services.prompts import PromptContext, build_answer_prompt
 
 
 def test_scenario_1_short_factual_question():
@@ -407,3 +408,64 @@ def test_scenario_17_claim_verifier_grounding():
     assert stats["claims_verified"] == 3
     assert stats["claims_supported"] == 1
     assert stats["unsupported_claims_removed"] >= 1
+
+
+def test_scenario_18_abstention_and_citation_attachment():
+    """Scenario 18: ClaimVerifier attaches missing citations, remaps citations, and enforces honest abstention."""
+    q = "Explain the Antikythera mechanism and its transmission to the Islamic world."
+    chunks = [
+        RetrievedChunk(
+            chunk_id=1,
+            document_title="Antikythera mechanism",
+            source_url="https://en.wikipedia.org/wiki/Antikythera_mechanism",
+            section_title="Operation",
+            passage_text="The Antikythera mechanism used thirty bronze gears to model astronomical cycles.",
+            rrf_score=0.9,
+            retrieval_method="hybrid",
+        ),
+        RetrievedChunk(
+            chunk_id=2,
+            document_title="Antikythera mechanism",
+            source_url="https://en.wikipedia.org/wiki/Antikythera_mechanism",
+            section_title="History",
+            passage_text="Discovered in 1901 from the Antikythera wreck, it is widely considered the oldest known analogue computer.",
+            rrf_score=0.85,
+            retrieval_method="hybrid",
+        ),
+    ]
+
+    # Sentence 1: Has no citation, but is supported by chunk 1.
+    # Sentence 2: Has wrong citation [1], but is actually supported by chunk 2.
+    raw_answer = (
+        "The Antikythera mechanism used thirty bronze gears to model astronomical cycles. "
+        "It is widely considered the oldest known analogue computer [1]."
+    )
+
+    missing = ["transmission of knowledge to the Islamic world"]
+
+    cleaned_answer, stats = ClaimVerifier.verify_and_clean_answer(
+        answer_text=raw_answer,
+        selected_chunks=chunks,
+        question=q,
+        missing_aspects=missing,
+    )
+
+    # Sentence 1 should have received citation [1]
+    assert "[1]" in cleaned_answer
+    # Sentence 2 should have been remapped to [2]
+    assert "[2]" in cleaned_answer
+    assert stats["citations_remapped"] == 1
+    assert stats["citations_attached"] == 1
+
+    # Abstention notice must be appended for the missing aspect
+    assert "available evidence does not contain specific documentation regarding transmission of knowledge" in cleaned_answer.lower()
+
+    # Verify PromptContext and prompt formatting for missing aspects
+    p_ctx = PromptContext(
+        question=q,
+        passages=[{"document_title": c.document_title, "passage_text": c.passage_text} for c in chunks],
+        missing_aspects=missing,
+    )
+    prompt_str = build_answer_prompt(p_ctx)
+    assert "MANDATORY ABSTENTION" in prompt_str
+    assert "transmission of knowledge" in prompt_str

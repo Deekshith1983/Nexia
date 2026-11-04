@@ -15,6 +15,8 @@ class PromptContext(BaseModel):
     passages: List[Dict[str, Any]] = []
     conflicts: List[str] = []
     sufficiency_rating: str = "SUFFICIENT"
+    missing_aspects: List[str] = []
+    subqueries: List[str] = []
 
 
 SYSTEM_PROMPT = """You are Nexia, an authoritative, knowledgeable conversational assistant.
@@ -88,6 +90,18 @@ def build_answer_prompt(ctx: PromptContext) -> str:
             "- Complete all sentences cleanly.\n"
         )
 
+    # Inject missing evidence & abstention instructions if any aspect lacks evidence
+    missing_notice = ""
+    if ctx.missing_aspects:
+        missing_fmt = "\n".join(f"- {a}" for a in ctx.missing_aspects)
+        missing_notice = (
+            f"\nMISSING EVIDENCE & MANDATORY ABSTENTION:\n"
+            f"The provided evidence passages DO NOT contain documentation for the following requested aspect(s):\n"
+            f"{missing_fmt}\n"
+            f"You MUST explicitly state in your answer that the available evidence does not document these aspects (or that they remain historically uncertain). "
+            f"Under NO circumstances should you fabricate, speculate, or draw upon outside knowledge to invent an explanation for them.\n"
+        )
+
     prompt_body = f"""USER QUESTION: {ctx.question}
 
 QUESTION INTENT:
@@ -104,12 +118,15 @@ KNOWN CONFLICTS OR UNCERTAINTIES:
 SUFFICIENCY RATING (from Nexia deterministic analysis): {ctx.sufficiency_rating}
 {list_instruction}
 {multi_part_instruction}
+{missing_notice}
 INSTRUCTIONS:
 Provide a clear, authoritative, complete answer.
-If the question asks for a list: output a numbered list with EVERY item — do not summarize or truncate. Start directly with the list or a clean heading (e.g. "Presidents of India:").
-If the question is factual: answer in complete sentences.
-DO NOT use phrases such as "According to the provided document", "Based on the provided text", "as documented in the provided evidence", "as per evidence", "as per Wikipedia", or "The passage states". State the answer directly and cite sources with [1], [2].
-Only if the passages do not contain the answer, reply with:
+1. CITATION REQUIREMENT: Every factual claim must be followed immediately by a citation [k] referencing the specific passage that supports it.
+2. DO NOT use meta-language like "According to the provided document", "Based on the provided text", "as documented in the provided evidence", "as per evidence", "as per Wikipedia", or "The passage states". State the answer directly.
+3. If the question asks for a list: output a numbered list with EVERY item — do not summarize or truncate. Start directly with the list or a clean heading (e.g. "Presidents of India:").
+4. If the question is factual: answer in complete sentences.
+5. ABSTENTION: If evidence for any requested sub-aspect is not in the passages, state clearly: "The available evidence does not document [aspect]."
+6. Only if the passages completely lack information to answer the question, reply with:
 INSUFFICIENT_EVIDENCE: <brief reason why the evidence is insufficient>
 """
     return prompt_body
