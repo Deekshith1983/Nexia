@@ -3,7 +3,7 @@
 from contextlib import asynccontextmanager
 import logging
 from fastapi import FastAPI
-from app.api.routes import health, retrieval, relationships, evidence, answer
+from app.api.routes import health, retrieval, relationships, evidence, answer, conversations
 from app.core.config import settings
 from app.db.migrations import init_db
 
@@ -38,12 +38,14 @@ app.include_router(retrieval.router, prefix=settings.API_V1_PREFIX)
 app.include_router(relationships.router, prefix=settings.API_V1_PREFIX)
 app.include_router(evidence.router, prefix=settings.API_V1_PREFIX)
 app.include_router(answer.router, prefix=settings.API_V1_PREFIX)
+app.include_router(conversations.router, prefix=settings.API_V1_PREFIX)
 
 # Also include at root level for direct access
 app.include_router(retrieval.router)
 app.include_router(relationships.router)
 app.include_router(evidence.router)
 app.include_router(answer.router)
+app.include_router(conversations.router)
 
 
 @app.get("/")

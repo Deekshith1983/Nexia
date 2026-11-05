@@ -17,6 +17,9 @@ class PromptContext(BaseModel):
     sufficiency_rating: str = "SUFFICIENT"
     missing_aspects: List[str] = []
     subqueries: List[str] = []
+    conversation_history: List[Dict[str, str]] = []  # List of {"role": "user"|"assistant", "content": "..."}
+    conversation_summary: Optional[str] = None
+    memories: List[str] = []
 
 
 SYSTEM_PROMPT = """You are Nexia, an authoritative, knowledgeable conversational assistant.
@@ -102,7 +105,23 @@ def build_answer_prompt(ctx: PromptContext) -> str:
             f"Under NO circumstances should you fabricate, speculate, or draw upon outside knowledge to invent an explanation for them.\n"
         )
 
-    prompt_body = f"""USER QUESTION: {ctx.question}
+    # Inject multi-turn conversation context when present
+    history_str = ""
+    if ctx.conversation_summary:
+        history_str += f"\nPREVIOUS CONVERSATION SUMMARY:\n{ctx.conversation_summary}\n"
+    if ctx.conversation_history:
+        history_lines = []
+        for turn in ctx.conversation_history:
+            role_label = "User" if turn.get("role") == "user" else "Assistant"
+            history_lines.append(f"{role_label}: {turn.get('content', '')}")
+        history_str += "\nRECENT CONVERSATION HISTORY:\n" + "\n".join(history_lines) + "\n"
+
+    # Inject relevant conversational memories when present
+    memory_str = ""
+    if ctx.memories:
+        memory_str = "\nRELEVANT CONVERSATION MEMORIES (FOR CONTEXT RESOLUTION ONLY):\n" + "\n".join(f"- {m}" for m in ctx.memories) + "\n"
+
+    prompt_body = f"""{history_str}{memory_str}USER QUESTION: {ctx.question}
 
 QUESTION INTENT:
 - Question Type: {ctx.question_type or 'FACTOID'}

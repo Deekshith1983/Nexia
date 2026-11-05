@@ -127,7 +127,7 @@ async def test_embedding_service_dimension_check():
     from unittest.mock import MagicMock
     svc = EmbeddingService(expected_dimension=768)
 
-    with patch("httpx.AsyncClient.post") as mock_post:
+    with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
         mock_response = MagicMock()
         mock_response.status_code = 200
         # Return 3-dim vector instead of 768
@@ -178,7 +178,8 @@ async def test_llm_adapter_insufficient_evidence():
         sufficiency_rating="INSUFFICIENT",
     )
 
-    with patch("httpx.AsyncClient.post") as mock_post:
+    with patch("app.services.llm_adapter.httpx.AsyncClient") as mock_client_cls:
+        mock_client = AsyncMock()
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
@@ -187,7 +188,8 @@ async def test_llm_adapter_insufficient_evidence():
             "eval_count": 20,
             "total_duration": 1500000000,
         }
-        mock_post.return_value = mock_response
+        mock_client.post.return_value = mock_response
+        mock_client_cls.return_value.__aenter__.return_value = mock_client
 
         result = await adapter.generate_answer(ctx)
         assert result.status == "INSUFFICIENT_EVIDENCE"

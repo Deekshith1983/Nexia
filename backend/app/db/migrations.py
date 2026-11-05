@@ -28,7 +28,7 @@ async def init_db() -> None:
             )
         )
 
-        # HNSW vector index for cosine distance
+        # HNSW vector index for cosine distance on chunks
         try:
             await conn.execute(
                 text(
@@ -37,7 +37,18 @@ async def init_db() -> None:
                 )
             )
         except Exception as e:
-            logger.warning("Could not create HNSW index, falling back or skipping: %s", e)
+            logger.warning("Could not create HNSW index on chunks: %s", e)
+
+        # HNSW vector index for cosine distance on memories
+        try:
+            await conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS idx_memories_embedding_hnsw "
+                    "ON nexia_memories USING hnsw (embedding vector_cosine_ops);"
+                )
+            )
+        except Exception as e:
+            logger.warning("Could not create HNSW index on memories: %s", e)
 
     logger.info("Database initialization complete.")
 

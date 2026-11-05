@@ -1,7 +1,8 @@
 """Ollama LLM adapter for answer generation using local gemma3:4b."""
 
+import json
 import logging
-from typing import Optional, Tuple
+from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple, Union
 import httpx
 from pydantic import BaseModel
 
@@ -145,3 +146,95 @@ class OllamaLLMAdapter:
             eval_duration_ms=round(eval_duration, 2),
             tokens_per_second=round(tokens_per_sec, 2),
         )
+
+    async def generate_answer_stream(
+        self,
+        context: PromptContext,
+        num_predict_override: Optional[int] = None,
+    ) -> AsyncGenerator[Tuple[str, Any], None]:
+        """Stream generated tokens progressively from Ollama.
+
+        Yields:
+            ("token", str): Token text fragment
+            ("done", LLMGenerationResult): Final consolidated generation result
+        """
+        prompt_text = build_answer_prompt(context)
+        num_predict = num_predict_override if num_predict_override is not None else settings.LLM_NUM_PREDICT
+
+        payload = {
+            "model": self.model,
+            "system": SYSTEM_PROMPT,
+            "prompt": prompt_text,
+            "stream": True,
+            "options": {
+                "num_thread": settings.LLM_NUM_THREADS,
+                "num_ctx": settings.LLM_NUM_CTX,
+                "num_predict": num_predict,
+                "temperature": self.temperature,
+            },
+            "keep_alive": settings.LLM_KEEP_ALIVE,
+        }
+
+        accumulated_chunks: List[str] = []
+        final_meta: Dict[str, Any] = {}
+
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                async with client.stream(
+                    "POST",
+                    f"{self.base_url}/api/generate",
+                    json=payload,
+                ) as response:
+                    if response.status_code != 200:
+                        err_body = await response.aread()
+                        raise LLMOutputError(f"Ollama streaming returned HTTP {response.status_code}: {err_body.decode('utf-8', errors='ignore')}")
+
+                    async for line in response.aiter_lines():
+                        if not line:
+                            continue
+                        try:
+                            chunk_data = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+
+                        token = chunk_data.get("response", "")
+                        if token:
+                            accumulated_chunks.append(token)
+                            yield ("token", token)
+
+                        if chunk_data.get("done", False):
+                            final_meta = chunk_data
+                            break
+
+        except httpx.TimeoutException as exc:
+            raise LLMTimeoutError(f"LLM streaming timed out after {self.timeout}s: {exc}") from exc
+        except httpx.RequestError as exc:
+            raise LLMUnavailableError(f"Failed to connect to Ollama streaming at {self.base_url}: {exc}") from exc
+
+        raw_answer = "".join(accumulated_chunks).strip()
+        status = "ANSWERED"
+        if raw_answer.startswith("INSUFFICIENT_EVIDENCE:") or "insufficient evidence" in raw_answer.lower():
+            status = "INSUFFICIENT_EVIDENCE"
+        elif context.conflicts and ("conflict" in raw_answer.lower() or "dispute" in raw_answer.lower()):
+            status = "CONFLICTING_EVIDENCE"
+
+        total_duration = final_meta.get("total_duration", 0) / 1_000_000.0
+        load_duration = final_meta.get("load_duration", 0) / 1_000_000.0
+        prompt_eval_duration = final_meta.get("prompt_eval_duration", 0) / 1_000_000.0
+        eval_duration = final_meta.get("eval_duration", 0) / 1_000_000.0
+        eval_count = final_meta.get("eval_count", len(accumulated_chunks))
+        tokens_per_sec = (eval_count / (eval_duration / 1000.0)) if eval_duration > 0 else 0.0
+
+        gen_result = LLMGenerationResult(
+            answer_text=raw_answer,
+            status=status,
+            model=self.model,
+            prompt_tokens=final_meta.get("prompt_eval_count"),
+            response_tokens=eval_count,
+            generation_time_ms=round(total_duration, 2),
+            load_duration_ms=round(load_duration, 2),
+            prompt_eval_duration_ms=round(prompt_eval_duration, 2),
+            eval_duration_ms=round(eval_duration, 2),
+            tokens_per_second=round(tokens_per_sec, 2),
+        )
+        yield ("done", gen_result)

@@ -3,7 +3,7 @@
 import logging
 import re
 import time
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, AsyncGenerator, Dict, List, Optional, Set, Tuple
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,7 +27,17 @@ from app.services.llm_adapter import (
     LLMUnavailableError,
     OllamaLLMAdapter,
 )
+from app.schemas.conversation import MessageRole, MessageStatus
+from app.services.conversation_manager import ConversationManager
+from app.services.context_manager import ContextManager
+from app.services.llm_orchestrator import LLMOrchestrator
 from app.services.prompts import PromptContext
+from app.services.citation_manager import (
+    PrimaryArticleSelector,
+    format_answer_with_primary_reference,
+)
+from app.services.response_controller import ResponseController
+from app.services.streaming_engine import StreamingEngine
 
 logger = logging.getLogger("nexia.orchestrator")
 
@@ -195,12 +205,21 @@ class AnswerOrchestrator:
         hybrid_retrieval: Optional[HybridRetrievalService] = None,
         llm_adapter: Optional[OllamaLLMAdapter] = None,
         passage_retriever: Optional[PassageRetriever] = None,
+        conversation_manager: Optional[ConversationManager] = None,
+        context_manager: Optional[ContextManager] = None,
     ):
         self.evidence_reasoner = evidence_reasoner or EvidenceReasoner()
         self.document_cache = document_cache or DocumentCacheService()
         self.hybrid_retrieval = hybrid_retrieval or HybridRetrievalService()
         self.llm_adapter = llm_adapter or OllamaLLMAdapter()
         self.passage_retriever = passage_retriever or PassageRetriever()
+        self.conversation_manager = conversation_manager or ConversationManager()
+        self.context_manager = context_manager or ContextManager()
+        self.llm_orchestrator = LLMOrchestrator(
+            conversation_manager=self.conversation_manager,
+            context_manager=self.context_manager,
+            llm_adapter=self.llm_adapter,
+        )
 
     async def answer(self, request: AnswerRequest) -> AnswerResponse:
         """Process a user question through the complete pipeline to generate a grounded answer."""
@@ -607,6 +626,15 @@ class AnswerOrchestrator:
             q_relation = None
 
         # 6. Build PromptContext and Invoke LLM Adapter
+        history_dicts = []
+        if request.conversation_id:
+            try:
+                hist_msgs = await self.conversation_manager.get_messages(request.conversation_id, limit=6)
+                for hm in hist_msgs:
+                    history_dicts.append({"role": hm.role.value, "content": hm.content})
+            except Exception as e:
+                logger.warning("Failed to fetch conversation history for %s: %s", request.conversation_id, e)
+
         prompt_ctx = PromptContext(
             question=question,
             question_type=q_type,
@@ -617,6 +645,7 @@ class AnswerOrchestrator:
             sufficiency_rating=sufficiency_status,
             missing_aspects=diagnostics.missing_aspects or [],
             subqueries=diagnostics.subqueries_generated or [],
+            conversation_history=history_dicts,
         )
         prompt_construction_ms = round((time.perf_counter() - t_prompt_start) * 1000, 2)
 
@@ -771,11 +800,48 @@ class AnswerOrchestrator:
         logger.info("=== [Stage 7] Finished in %.2fs (status: %s, LLM: %.2fs) ===",
                     total_req_ms / 1000, status, llm_duration_ms / 1000)
 
+        # Select single primary article and format answer presentation (no inline [N] citations, single trailing reference)
+        primary_article = None
+        if status == "ANSWERED" and not answer_text.startswith("INSUFFICIENT_EVIDENCE") and not answer_text.startswith("LLM answer generation failed"):
+            primary_article = PrimaryArticleSelector.select_primary_article(
+                selected_chunks=selected_chunks,
+                answer_text=answer_text,
+                question=question,
+                subqueries=diagnostics.subqueries_generated,
+            )
+        user_facing_answer = format_answer_with_primary_reference(
+            answer_text=answer_text,
+            primary_article=primary_article,
+        )
+
+        # Persist conversation turn if conversation_id provided
+        saved_msg_id = None
+        if request.conversation_id:
+            try:
+                # Add user message
+                await self.conversation_manager.add_message(
+                    conversation_id=request.conversation_id,
+                    role=MessageRole.USER,
+                    content=question,
+                )
+                # Add assistant message
+                ast_msg = await self.conversation_manager.add_message(
+                    conversation_id=request.conversation_id,
+                    role=MessageRole.ASSISTANT,
+                    content=user_facing_answer,
+                    token_count=resp_tokens,
+                    message_status=MessageStatus.COMPLETED if status == "ANSWERED" else MessageStatus.FAILED,
+                    source_references=[r.model_dump() for r in source_refs],
+                    diagnostics={"claims_verified": diagnostics.claims_verified},
+                )
+                saved_msg_id = ast_msg.id
+            except Exception as e:
+                logger.warning("Failed to persist conversation turn: %s", e)
 
         # 7. Assemble final AnswerResponse
         return AnswerResponse(
             question=question,
-            answer_text=answer_text,
+            answer_text=user_facing_answer,
             answer_status=status,
             source_references=source_refs,
             conflicts=conflicts_text,
@@ -783,4 +849,155 @@ class AnswerOrchestrator:
             retrieval_diagnostics=diagnostics,
             stage6_evidence_package=evidence_package,
             error_message=error_msg,
+            conversation_id=request.conversation_id,
+            message_id=saved_msg_id,
         )
+
+    async def answer_stream(
+        self,
+        request: AnswerRequest,
+        request_id: Optional[str] = None,
+    ) -> AsyncGenerator[str, None]:
+        """Process question and stream grounded response tokens progressively via SSE."""
+        from uuid import uuid4
+        req_id = request_id or str(uuid4())
+        question = request.question.strip()
+
+        yield StreamingEngine.emit_start(
+            request_id=req_id,
+            conversation_id=request.conversation_id,
+            model=settings.LLM_MODEL,
+        )
+
+        yield StreamingEngine.emit_progress(
+            request_id=req_id,
+            stage="retrieval",
+            message="Gathering evidence passages from knowledge base...",
+        )
+
+        # Detect listing query
+        _is_list_query = NLPQueryParser.is_list_question(question)
+        if _is_list_query:
+            request = request.model_copy(update={
+                "max_evidence_passages": min(request.max_evidence_passages * 2, 8),
+                "top_k_per_document": min(request.top_k_per_document + 2, 10),
+            })
+
+        # Run non-LLM upstream retrieval by calling answer() with a fast stub or running stages
+        # To ensure exact parity, we use the evidence gathering from answer()
+        evidence_passages: List[Dict[str, Any]] = []
+        try:
+            # Stage 6 reasoning
+            reasoning_req = EvidenceReasoningRequest(
+                question=question,
+                subject_entity=request.subject_entity,
+                object_entity=request.object_entity,
+                predicate_filter=request.predicate_filter,
+                top_k_per_document=request.top_k_per_document,
+                min_confidence=request.min_confidence,
+                force_refresh=request.force_refresh,
+            )
+            reasoning_res = await self.evidence_reasoner.reason(reasoning_req)
+            evidence_package = reasoning_res.evidence_package
+
+            # Target docs
+            target_docs = set()
+            for cluster in evidence_package.evidence_clusters:
+                for item in cluster.items:
+                    doc_title = getattr(item, "source_document", None) or getattr(item, "document_title", None)
+                    if doc_title:
+                        target_docs.add(doc_title)
+
+            if evidence_package.question_intent and evidence_package.question_intent.entities:
+                for e in evidence_package.question_intent.entities:
+                    target_docs.add(e.normalized_text)
+                    target_docs.add(e.text)
+
+            complexity_res = AdaptiveQueryAnalyzer.analyze_complexity(question)
+            if settings.ADAPTIVE_RETRIEVAL_ENABLED and complexity_res.target_articles:
+                for art in complexity_res.target_articles:
+                    if art:
+                        target_docs.add(art)
+
+            session_factory = get_session_factory()
+            page_ids = []
+            async with session_factory() as session:
+                for doc_title in target_docs:
+                    try:
+                        doc, _ = await self.document_cache.get_or_fetch_document(
+                            title=doc_title,
+                            force_refresh=request.force_refresh,
+                            session=session,
+                        )
+                        if doc.page_id not in page_ids:
+                            page_ids.append(doc.page_id)
+                    except Exception:
+                        pass
+                if not page_ids:
+                    try:
+                        doc, _ = await self.document_cache.get_or_fetch_document(
+                            title=question,
+                            force_refresh=request.force_refresh,
+                            session=session,
+                        )
+                        if doc.page_id not in page_ids:
+                            page_ids.append(doc.page_id)
+                    except Exception:
+                        pass
+
+                retrieved_chunks = []
+                if page_ids:
+                    if settings.ADAPTIVE_RETRIEVAL_ENABLED and complexity_res.complexity in (QueryComplexity.MEDIUM, QueryComplexity.COMPLEX):
+                        sub_queries = [s.retrieval_query for s in complexity_res.subqueries]
+                        all_queries = [question] + [sq for sq in sub_queries if sq.lower() != question.lower()]
+                        retrieved_chunks = await self.hybrid_retrieval.retrieve_multi_query(
+                            queries=all_queries[: settings.MAX_SUBQUERIES_PER_COMPLEX_QUERY + 1],
+                            page_ids=page_ids,
+                            top_k=settings.HYBRID_TOP_K * 2,
+                            session=session,
+                            entity_boosts=complexity_res.primary_entities,
+                        )
+                    else:
+                        retrieved_chunks = await self.hybrid_retrieval.retrieve(
+                            question=question,
+                            page_ids=page_ids,
+                            top_k=settings.HYBRID_TOP_K,
+                            session=session,
+                        )
+
+            # Deduplicate & pack passages with EvidencePacker
+            if settings.ADAPTIVE_RETRIEVAL_ENABLED and complexity_res.complexity in (QueryComplexity.MEDIUM, QueryComplexity.COMPLEX):
+                selected_chunks = EvidencePacker.pack_slotted_evidence(
+                    subqueries=complexity_res.subqueries,
+                    candidate_chunks=retrieved_chunks,
+                    max_total_passages=request.max_evidence_passages,
+                )
+            else:
+                selected_chunks = retrieved_chunks[: request.max_evidence_passages]
+
+            for c in selected_chunks:
+                evidence_passages.append({
+                    "document_title": c.document_title,
+                    "section_title": c.section_title,
+                    "source_url": c.source_url,
+                    "passage_text": c.passage_text,
+                })
+
+        except Exception as e:
+            logger.warning("Upstream retrieval in streaming encountered: %s", e)
+
+        yield StreamingEngine.emit_progress(
+            request_id=req_id,
+            stage="inference",
+            message=f"Generating grounded answer using local {settings.LLM_MODEL}...",
+        )
+
+        # Delegate streaming execution to LLMOrchestrator
+        async for sse_chunk in self.llm_orchestrator.execute_turn_stream(
+            question=question,
+            evidence_passages=evidence_passages,
+            conversation_id=request.conversation_id,
+            is_list_query=_is_list_query,
+            request_id=req_id,
+        ):
+            yield sse_chunk

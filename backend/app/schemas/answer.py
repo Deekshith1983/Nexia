@@ -1,6 +1,7 @@
 """Pydantic schemas for Stage 7 Grounded Answer API."""
 
 from typing import List, Literal, Optional
+from uuid import UUID
 from pydantic import BaseModel, Field
 
 from app.schemas.evidence_package import EvidencePackage
@@ -17,6 +18,7 @@ class AnswerRequest(BaseModel):
     min_confidence: float = Field(default=0.60, ge=0.0, le=1.0, description="Minimum confidence threshold")
     max_evidence_passages: int = Field(default=3, ge=1, le=12, description="Maximum evidence passages sent to LLM")
     force_refresh: bool = Field(default=False, description="Bypass document cache and re-fetch from Wikipedia")
+    conversation_id: Optional[UUID] = Field(default=None, description="Optional active conversation session UUID")
 
 
 class SourceReference(BaseModel):
@@ -101,3 +103,5 @@ class AnswerResponse(BaseModel):
     retrieval_diagnostics: RetrievalDiagnostics
     stage6_evidence_package: Optional[EvidencePackage] = None
     error_message: Optional[str] = None
+    conversation_id: Optional[UUID] = None
+    message_id: Optional[UUID] = None
