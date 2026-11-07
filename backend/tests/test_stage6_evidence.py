@@ -167,86 +167,76 @@ def test_sufficiency_assessment_insufficient():
 # Integration Tests via API & Pipeline
 # ============================================================================
 
-def test_api_stage6_einstein_zurich():
-    """Stage 6 retrieves, reasons, dedupes, and clusters Einstein & University of Zurich evidence."""
-    response = client.get(
-        "/retrieval/evidence",
-        params={"question": "What is the relationship between Albert Einstein and the University of Zurich?"},
-    )
-    assert response.status_code == 200
-    data = response.json()
+# --- Internal Service Tests: Stage 6 EvidenceReasoner Service ---
 
-    assert data["status"] in ("COMPLETED", "PARTIALLY_SUPPORTED")
-    package = data["evidence_package"]
-    assert package["question"] == "What is the relationship between Albert Einstein and the University of Zurich?"
-    assert package["total_evidence_items"] > 0
-    assert package["total_clusters"] > 0
-    assert package["sufficiency_assessment"]["status"] in ("SUFFICIENT", "PARTIAL")
+@pytest.mark.asyncio
+async def test_service_stage6_einstein_zurich():
+    """Stage 6 retrieves, reasons, dedupes, and clusters Einstein & University of Zurich evidence."""
+    res = await reasoner.reason(
+        EvidenceReasoningRequest(question="What is the relationship between Albert Einstein and the University of Zurich?")
+    )
+    assert res.status in ("COMPLETED", "PARTIALLY_SUPPORTED")
+    package = res.evidence_package
+    assert package.question == "What is the relationship between Albert Einstein and the University of Zurich?"
+    assert package.total_evidence_items > 0
+    assert package.total_clusters > 0
+    assert package.sufficiency_assessment.status in ("SUFFICIENT", "PARTIAL")
 
     # Verify cluster structure
-    first_cluster = package["evidence_clusters"][0]
-    assert "cluster_id" in first_cluster
-    assert "cluster_topic" in first_cluster
-    assert len(first_cluster["items"]) > 0
+    first_cluster = package.evidence_clusters[0]
+    assert first_cluster.cluster_id is not None
+    assert first_cluster.cluster_topic is not None
+    assert len(first_cluster.items) > 0
 
     # Verify at least one answer candidate or grounded entity surfaced
-    candidates = package["answer_candidates"]
+    candidates = package.answer_candidates
     assert len(candidates) > 0
 
 
-def test_api_stage6_krishnadevaraya_successor():
+@pytest.mark.asyncio
+async def test_service_stage6_krishnadevaraya_successor():
     """Stage 6 produces evidence package identifying successor of Krishnadevaraya."""
-    response = client.get(
-        "/retrieval/evidence",
-        params={"question": "successor of Shri Krishnadevaraya"},
+    res = await reasoner.reason(
+        EvidenceReasoningRequest(question="successor of Shri Krishnadevaraya")
     )
-    assert response.status_code == 200
-    data = response.json()
-
-    package = data["evidence_package"]
-    assert package["sufficiency_assessment"]["status"] in ("SUFFICIENT", "PARTIAL")
+    package = res.evidence_package
+    assert package.sufficiency_assessment.status in ("SUFFICIENT", "PARTIAL")
 
     # Check that candidate answer mentions Achyuta Deva Raya or succession
-    candidates = [c["candidate_text"].lower() for c in package["answer_candidates"]]
-    assert any("achyuta" in c for c in candidates) or package["total_evidence_items"] > 0
+    candidates = [c.candidate_text.lower() for c in package.answer_candidates]
+    assert any("achyuta" in c for c in candidates) or package.total_evidence_items > 0
 
 
-def test_api_stage6_apple_founder():
+@pytest.mark.asyncio
+async def test_service_stage6_apple_founder():
     """Stage 6 handles 'who founded Apple?' corporate founder retrieval."""
-    response = client.get(
-        "/retrieval/evidence",
-        params={"question": "who founded Apple?"},
+    res = await reasoner.reason(
+        EvidenceReasoningRequest(question="who founded Apple?")
     )
-    assert response.status_code == 200
-    data = response.json()
-
-    package = data["evidence_package"]
-    assert package["total_evidence_items"] > 0
-    assert package["sufficiency_assessment"]["status"] in ("SUFFICIENT", "PARTIAL")
+    package = res.evidence_package
+    assert package.total_evidence_items > 0
+    assert package.sufficiency_assessment.status in ("SUFFICIENT", "PARTIAL")
 
 
-def test_api_stage6_empty_query():
+@pytest.mark.asyncio
+async def test_service_stage6_empty_query():
     """Empty query should gracefully return error status without crashing."""
-    response = client.get(
-        "/retrieval/evidence",
-        params={"question": "   "},
+    res = await reasoner.reason(
+        EvidenceReasoningRequest(question="   ")
     )
-    assert response.status_code == 200
-    data = response.json()
-    assert data["status"] == "ERROR"
-    assert data["evidence_package"]["sufficiency_assessment"]["status"] == "INSUFFICIENT"
+    assert res.status == "ERROR"
+    assert res.evidence_package.sufficiency_assessment.status == "INSUFFICIENT"
 
 
-def test_api_stage6_post_endpoint():
-    """POST /retrieval/evidence must accept body and produce valid EvidencePackage."""
-    payload = {
-        "question": "What is the relationship between Albert Einstein and the University of Zurich?",
-        "top_k_per_document": 3,
-        "dedup_similarity_threshold": 0.70,
-    }
-    response = client.post("/retrieval/evidence", json=payload)
-    assert response.status_code == 200
-    data = response.json()
-    assert data["status"] in ("COMPLETED", "PARTIALLY_SUPPORTED")
-    assert data["evidence_package"]["stage6_status"] == "COMPLETED"
-    assert "deduplication_summary" in data["evidence_package"]
+@pytest.mark.asyncio
+async def test_service_stage6_reasoning_params():
+    """EvidenceReasoningRequest must accept parameters and produce valid EvidencePackage."""
+    req = EvidenceReasoningRequest(
+        question="What is the relationship between Albert Einstein and the University of Zurich?",
+        top_k_per_document=3,
+        dedup_similarity_threshold=0.70,
+    )
+    res = await reasoner.reason(req)
+    assert res.status in ("COMPLETED", "PARTIALLY_SUPPORTED")
+    assert res.evidence_package.stage6_status == "COMPLETED"
+    assert res.evidence_package.deduplication_summary is not None

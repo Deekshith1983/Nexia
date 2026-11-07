@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 import logging
 from typing import Any, Dict, List, Optional
 from uuid import UUID, uuid4
-from sqlalchemy import func, select, desc
+from sqlalchemy import desc, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.connection import get_session_factory
@@ -35,7 +35,7 @@ class ConversationManager:
         session: Optional[AsyncSession] = None,
     ) -> ConversationRead:
         """Create a new conversation session."""
-        conv_title = title or "New Conversation"
+        conv_title = title or "New Chat"
         conv = NexiaConversation(
             id=uuid4(),
             title=conv_title,
@@ -164,6 +164,8 @@ class ConversationManager:
                 conv.status = status.value
             if metadata is not None:
                 conv.metadata_json = metadata
+            conv.updated_at = datetime.now(timezone.utc)
+            s.add(conv)
             await s.commit()
             await s.refresh(conv)
             return await self.get_conversation(conversation_id, session=s)
@@ -218,22 +220,25 @@ class ConversationManager:
         )
 
         async def _add(s: AsyncSession):
+            now = datetime.now(timezone.utc)
             # Ensure conversation exists
             conv_stmt = select(NexiaConversation).where(NexiaConversation.id == conversation_id)
             conv_res = await s.execute(conv_stmt)
             conv = conv_res.scalar_one_or_none()
             if not conv:
-                # Auto-create if not present
+                # Auto-create if not present with default temporary title
                 conv = NexiaConversation(
                     id=conversation_id,
-                    title=content[:60] if role == MessageRole.USER else "New Conversation",
+                    title="New Chat",
                     status=ConversationStatus.ACTIVE.value,
                     metadata_json={},
+                    created_at=now,
+                    updated_at=now,
                 )
                 s.add(conv)
-            elif conv.title == "New Conversation" and role == MessageRole.USER:
-                # Auto-title from initial user question
-                conv.title = content[:60]
+            else:
+                conv.updated_at = now
+                s.add(conv)
 
             s.add(msg)
             await s.commit()
@@ -318,3 +323,69 @@ class ConversationManager:
             message_count=len(messages),
             messages=messages,
         )
+
+    async def is_eligible_for_title_generation(
+        self,
+        conversation_id: UUID,
+        session: Optional[AsyncSession] = None,
+    ) -> bool:
+        """Check if conversation is eligible for automatic title generation.
+
+        Eligible iff:
+        1. Conversation exists
+        2. Title is currently 'New Chat' or 'New Conversation' (case-insensitive check)
+        3. Message count is exactly 2 (first user turn + first assistant answer)
+        """
+        async def _check(s: AsyncSession) -> bool:
+            stmt = select(NexiaConversation).where(NexiaConversation.id == conversation_id)
+            res = await s.execute(stmt)
+            conv = res.scalar_one_or_none()
+            if not conv:
+                return False
+
+            normalized_title = conv.title.strip().lower()
+            if normalized_title not in ("new chat", "new conversation"):
+                return False
+
+            count_stmt = select(func.count()).select_from(NexiaConversationMessage).where(
+                NexiaConversationMessage.conversation_id == conversation_id
+            )
+            count_res = await s.execute(count_stmt)
+            msg_count = count_res.scalar() or 0
+            return msg_count == 2
+
+        if session:
+            return await _check(session)
+        async with self.session_factory() as s:
+            return await _check(s)
+
+    async def update_title_atomic(
+        self,
+        conversation_id: UUID,
+        new_title: str,
+        session: Optional[AsyncSession] = None,
+    ) -> bool:
+        """Atomically update title only if it is still 'New Chat' or 'New Conversation'.
+
+        Returns True if row was updated, False if conversation was missing or already renamed.
+        """
+        async def _update(s: AsyncSession) -> bool:
+            stmt = (
+                update(NexiaConversation)
+                .where(
+                    NexiaConversation.id == conversation_id,
+                    NexiaConversation.title.in_(["New Chat", "New Conversation"]),
+                )
+                .values(
+                    title=new_title,
+                    updated_at=datetime.now(timezone.utc),
+                )
+            )
+            res = await s.execute(stmt)
+            await s.commit()
+            return res.rowcount > 0
+
+        if session:
+            return await _update(session)
+        async with self.session_factory() as s:
+            return await _update(s)

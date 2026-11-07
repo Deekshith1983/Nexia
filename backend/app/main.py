@@ -3,7 +3,8 @@
 from contextlib import asynccontextmanager
 import logging
 from fastapi import FastAPI
-from app.api.routes import health, retrieval, relationships, evidence, answer, conversations
+from fastapi.middleware.cors import CORSMiddleware
+from app.api.routes import health, answer, conversations
 from app.core.config import settings
 from app.db.migrations import init_db
 
@@ -32,23 +33,23 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Include API v1 router
+# Enable CORS for local frontend integration
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Approved API v1 routers for frontend integration
 app.include_router(health.router)
-app.include_router(retrieval.router, prefix=settings.API_V1_PREFIX)
-app.include_router(relationships.router, prefix=settings.API_V1_PREFIX)
-app.include_router(evidence.router, prefix=settings.API_V1_PREFIX)
-app.include_router(answer.router, prefix=settings.API_V1_PREFIX)
+app.include_router(health.router, prefix=settings.API_V1_PREFIX)
 app.include_router(conversations.router, prefix=settings.API_V1_PREFIX)
-
-# Also include at root level for direct access
-app.include_router(retrieval.router)
-app.include_router(relationships.router)
-app.include_router(evidence.router)
-app.include_router(answer.router)
-app.include_router(conversations.router)
+app.include_router(answer.router, prefix=settings.API_V1_PREFIX)
 
 
-@app.get("/")
+@app.get("/", tags=["Index"])
 async def root():
     return {
         "name": settings.PROJECT_NAME,
@@ -56,13 +57,11 @@ async def root():
         "docs_url": "/docs",
         "health_url": "/health",
         "endpoints": {
-            "search": f"{settings.API_V1_PREFIX}/retrieval/search",
-            "document": f"{settings.API_V1_PREFIX}/retrieval/document",
-            "passages": f"{settings.API_V1_PREFIX}/retrieval/passages",
-            "multi_document": f"{settings.API_V1_PREFIX}/retrieval/multi-document",
-            "relationships": f"{settings.API_V1_PREFIX}/retrieval/relationships",
-            "evidence": f"{settings.API_V1_PREFIX}/retrieval/evidence",
+            "health": f"{settings.API_V1_PREFIX}/health",
+            "conversations": f"{settings.API_V1_PREFIX}/conversations",
             "answer": f"{settings.API_V1_PREFIX}/retrieval/answer",
+            "answer_stream": f"{settings.API_V1_PREFIX}/retrieval/answer/stream",
+            "cancel": f"{settings.API_V1_PREFIX}/retrieval/cancel/{{request_id}}",
         },
     }
 

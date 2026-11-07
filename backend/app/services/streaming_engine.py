@@ -110,6 +110,22 @@ class StreamingEngine:
         )
 
     @classmethod
+    def emit_title(
+        cls,
+        request_id: str,
+        conversation_id: Optional[UUID],
+        title: str,
+    ) -> str:
+        return SSEEvent.format(
+            "title",
+            {
+                "request_id": request_id,
+                "conversation_id": str(conversation_id) if conversation_id else None,
+                "title": title,
+            },
+        )
+
+    @classmethod
     def emit_error(
         cls,
         request_id: str,

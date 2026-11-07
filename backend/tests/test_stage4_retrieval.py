@@ -3,8 +3,15 @@
 import pytest
 from fastapi.testclient import TestClient
 from app.main import app
+from app.retrieval.document_retriever import DocumentRetriever
 from app.retrieval.entity_extractor import EntityExtractor
-from app.schemas.retrieval import Stage4StructuredQuery
+from app.retrieval.multi_doc_retriever import MultiDocRetriever
+from app.retrieval.passage_retriever import PassageRetriever
+from app.schemas.retrieval import (
+    MultiDocRetrievalRequest,
+    PassageRetrievalRequest,
+    Stage4StructuredQuery,
+)
 
 client = TestClient(app)
 
@@ -87,74 +94,90 @@ def test_non_relationship_query_passthrough():
     assert len(query.entities) >= 1
 
 
-# --- 2. Live Integration Tests: Stage 4 Multi-Document Endpoints ---
+# --- 2. Internal Service Tests: Stage 4 MultiDocRetriever Service ---
 
-def test_api_successor_krishnadevaraya():
+@pytest.mark.asyncio
+async def test_service_successor_krishnadevaraya():
     """Verify Stage 4 retrieval for 'successor of Shri Krishnadevaraya' returns Achyuta Deva Raya as object."""
-    response = client.get(
-        "/api/v1/retrieval/multi-document?question=successor%20of%20Shri%20Krishnadevaraya&top_k_per_document=3&min_score=0.15"
+    retriever = MultiDocRetriever()
+    data = await retriever.retrieve_multi_document(
+        MultiDocRetrievalRequest(
+            question="successor of Shri Krishnadevaraya",
+            top_k_per_document=3,
+            min_score=0.15,
+        )
     )
-    assert response.status_code == 200
-    data = response.json()
-    assert data["status"] == "RELATIONSHIP_SUPPORTED"
-    assert data["is_relationship_proven"] is True
-    assert len(data["entities_identified"]) >= 1
-    assert data["entities_identified"][0]["normalized_text"] == "Krishnadevaraya"
-    assert len(data["relationships_discovered"]) >= 1
-    assert "achyuta" in data["relationships_discovered"][0]["object"].lower()
-    assert data["diagnostics"]["failure_stage"] == "NONE"
+    assert data.status == "RELATIONSHIP_SUPPORTED"
+    assert data.is_relationship_proven is True
+    assert len(data.entities_identified) >= 1
+    assert data.entities_identified[0].normalized_text == "Krishnadevaraya"
+    assert len(data.relationships_discovered) >= 1
+    assert "achyuta" in data.relationships_discovered[0].object.lower()
+    assert data.diagnostics.failure_stage == "NONE"
 
 
-def test_api_multi_doc_einstein_zurich():
+@pytest.mark.asyncio
+async def test_service_multi_doc_einstein_zurich():
     """Verify Stage 4 multi-document retrieval for Einstein and University of Zurich."""
-    response = client.get(
-        "/api/v1/retrieval/multi-document?question=What%20is%20the%20relationship%20between%20Albert%20Einstein%20and%20the%20University%20of%20Zurich%3F&top_k_per_document=3&min_score=0.15"
+    retriever = MultiDocRetriever()
+    data = await retriever.retrieve_multi_document(
+        MultiDocRetrievalRequest(
+            question="What is the relationship between Albert Einstein and the University of Zurich?",
+            top_k_per_document=3,
+            min_score=0.15,
+        )
     )
-    assert response.status_code == 200
-    data = response.json()
-    assert data["status"] in ["RELATIONSHIP_SUPPORTED", "PARTIALLY_SUPPORTED"]
-    assert len(data["documents"]) >= 2
-    assert data["total_passages_evaluated"] > 0
+    assert data.status in ["RELATIONSHIP_SUPPORTED", "PARTIALLY_SUPPORTED"]
+    assert len(data.documents) >= 2
+    assert data.total_passages_evaluated > 0
 
 
-def test_api_multi_doc_india_pakistan():
+@pytest.mark.asyncio
+async def test_service_multi_doc_india_pakistan():
     """Verify Stage 4 multi-document retrieval for India and Pakistan."""
-    response = client.get(
-        "/api/v1/retrieval/multi-document?question=What%20is%20the%20difference%20between%20India%20and%20Pakistan%3F&top_k_per_document=3&min_score=0.15"
+    retriever = MultiDocRetriever()
+    data = await retriever.retrieve_multi_document(
+        MultiDocRetrievalRequest(
+            question="What is the difference between India and Pakistan?",
+            top_k_per_document=3,
+            min_score=0.15,
+        )
     )
-    assert response.status_code == 200
-    data = response.json()
-    assert len(data["documents"]) >= 2
-    assert data["total_passages_evaluated"] > 0
+    assert len(data.documents) >= 2
+    assert data.total_passages_evaluated > 0
 
 
-# --- 3. Backward Compatibility Regression Tests for Stages 1, 2, 3 ---
+# --- 3. Internal Service Regression Tests for Stages 1, 2, 3 ---
 
-def test_stage1_search_regression():
-    """Verify Stage 1 search endpoint is untouched and functional."""
-    response = client.get("/api/v1/retrieval/search?query=Albert%20Einstein&limit=5")
-    assert response.status_code == 200
-    data = response.json()
-    assert len(data["candidates"]) > 0
-    assert data["candidates"][0]["title"] == "Albert Einstein"
-
-
-def test_stage2_document_regression():
-    """Verify Stage 2 document retrieval is untouched and functional."""
-    response = client.get("/api/v1/retrieval/document?title=Albert%20Einstein")
-    assert response.status_code == 200
-    data = response.json()
-    assert data["status"] == "success"
-    assert data["document"]["title"] == "Albert Einstein"
-    assert len(data["document"]["sections"]) > 0
+@pytest.mark.asyncio
+async def test_stage1_search_service_regression():
+    """Verify Stage 1 DocumentRetriever search is functional."""
+    retriever = DocumentRetriever()
+    data = await retriever.search_candidates(query="Albert Einstein", limit=5)
+    assert len(data.candidates) > 0
+    assert data.candidates[0].title == "Albert Einstein"
 
 
-def test_stage3_passage_retrieval_regression():
-    """Verify Stage 3 passage retrieval remains fully operational for prior queries."""
-    response = client.get(
-        "/api/v1/retrieval/passages?question=first%20prime%20minister%20of%20india&top_k=3&min_score=0.15"
+@pytest.mark.asyncio
+async def test_stage2_document_service_regression():
+    """Verify Stage 2 DocumentRetriever document retrieval is functional."""
+    retriever = DocumentRetriever()
+    data = await retriever.retrieve_document(query="Albert Einstein", explicit_title="Albert Einstein")
+    assert data.status == "success"
+    assert data.document.title == "Albert Einstein"
+    assert len(data.document.sections) > 0
+
+
+@pytest.mark.asyncio
+async def test_stage3_passage_retrieval_service_regression():
+    """Verify Stage 3 PassageRetriever remains fully operational for prior queries."""
+    retriever = PassageRetriever()
+    data = await retriever.retrieve_passages(
+        PassageRetrievalRequest(
+            question="first prime minister of india",
+            top_k=3,
+            min_score=0.15,
+        )
     )
-    assert response.status_code == 200
-    data = response.json()
-    assert data["status"] in ["VALIDATED_SUFFICIENT_EVIDENCE", "PARTIALLY_SUPPORTED"]
-    assert len(data["evidence"]) > 0
+    assert data.status in ["VALIDATED_SUFFICIENT_EVIDENCE", "PARTIALLY_SUPPORTED"]
+    assert len(data.evidence) > 0

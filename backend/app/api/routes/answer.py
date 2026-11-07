@@ -24,7 +24,7 @@ async def generate_grounded_answer_post(
     return await orchestrator.answer(request)
 
 
-@router.get("/retrieval/answer", response_model=AnswerResponse)
+@router.get("/retrieval/answer", response_model=AnswerResponse, include_in_schema=False)
 @router.get("/retrieve/answer", response_model=AnswerResponse, include_in_schema=False)
 async def generate_grounded_answer_get(
     question: str = Query(..., description="Natural language question to answer"),
@@ -69,7 +69,7 @@ async def generate_grounded_answer_stream_post(
     )
 
 
-@router.get("/retrieval/answer/stream")
+@router.get("/retrieval/answer/stream", include_in_schema=False)
 @router.get("/retrieve/answer/stream", include_in_schema=False)
 async def generate_grounded_answer_stream_get(
     question: str = Query(..., description="Natural language question to answer"),

@@ -147,6 +147,49 @@ class OllamaLLMAdapter:
             tokens_per_second=round(tokens_per_sec, 2),
         )
 
+    async def generate_text(
+        self,
+        prompt: str,
+        system_prompt: Optional[str] = None,
+        num_predict: int = 24,
+        temperature: float = 0.3,
+        timeout: Optional[float] = None,
+    ) -> str:
+        """Execute a simple non-streaming completion prompt (e.g. for title generation)."""
+        call_timeout = timeout or min(self.timeout, 15.0)
+        payload: Dict[str, Any] = {
+            "model": self.model,
+            "prompt": prompt,
+            "stream": False,
+            "options": {
+                "num_thread": settings.LLM_NUM_THREADS,
+                "num_ctx": min(settings.LLM_NUM_CTX, 1024),
+                "num_predict": num_predict,
+                "temperature": temperature,
+            },
+            "keep_alive": settings.LLM_KEEP_ALIVE,
+        }
+        if system_prompt:
+            payload["system"] = system_prompt
+
+        try:
+            async with httpx.AsyncClient(timeout=call_timeout) as client:
+                response = await client.post(
+                    f"{self.base_url}/api/generate",
+                    json=payload,
+                )
+        except httpx.TimeoutException as exc:
+            raise LLMTimeoutError(f"LLM text generation timed out after {call_timeout}s: {exc}") from exc
+        except httpx.RequestError as exc:
+            raise LLMUnavailableError(f"Failed to connect to Ollama at {self.base_url}: {exc}") from exc
+
+        if response.status_code != 200:
+            raise LLMOutputError(f"Ollama returned HTTP {response.status_code}: {response.text}")
+
+        data = response.json()
+        raw_text = data.get("response", "").strip()
+        return raw_text
+
     async def generate_answer_stream(
         self,
         context: PromptContext,

@@ -117,7 +117,7 @@ class NexiaConversation(Base):
     __tablename__ = "nexia_conversations"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    title: Mapped[str] = mapped_column(String(256), nullable=False, default="New Conversation")
+    title: Mapped[str] = mapped_column(String(256), nullable=False, default="New Chat")
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="ACTIVE")
     metadata_json: Mapped[Dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     created_at: Mapped[datetime] = mapped_column(

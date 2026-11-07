@@ -22,22 +22,28 @@ Nexia/
 │   ├── tests/                   # Unit and integration test suites
 │   ├── requirements.txt         # Python backend dependencies
 │   └── README.md                # Backend specific documentation
+├── frontend/                    # Responsive React + TypeScript Vite frontend
+│   ├── src/                     # React components, hooks, stores, and services
+│   ├── package.json             # Frontend dependencies & scripts
+│   └── vite.config.ts           # Vite bundler & reverse proxy configuration
 ├── .gitignore
 └── README.md
 ```
 
-## Quick Start (Stage 0)
+## Quick Start
 
-1. **Activate Virtual Environment**:
-   ```bash
-   .\.venv\Scripts\Activate.ps1
-   ```
+### 1. Start Backend Server
+```bash
+.\.venv\Scripts\Activate.ps1
+uvicorn app.main:app --app-dir backend --reload --port 8000
+```
+- Health Check: `GET http://localhost:8000/health` -> `{"status": "ok"}`
+- Interactive Docs: `GET http://localhost:8000/docs`
 
-2. **Run Server**:
-   ```bash
-   uvicorn app.main:app --app-dir backend --reload --port 8000
-   ```
-
-3. **Verify Health Endpoint**:
-   - `GET http://localhost:8000/health` -> `{"status": "ok"}`
-   - `GET http://localhost:8000/docs` -> Interactive Swagger UI
+### 2. Start Frontend Application
+```bash
+cd frontend
+npm install
+npm run dev
+```
+- Open `http://localhost:5173` in your browser.

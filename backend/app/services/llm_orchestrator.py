@@ -24,6 +24,7 @@ from app.services.observability import ObservabilityManager
 from app.services.prompts import PromptContext, build_answer_prompt
 from app.services.response_controller import RequestCancelledError, ResponseController
 from app.services.streaming_engine import StreamingEngine
+from app.services.title_generator import ConversationTitleGenerator
 from app.services.citation_manager import (
     PrimaryArticleSelector,
     format_answer_with_primary_reference,
@@ -43,6 +44,7 @@ class LLMOrchestrator:
         llm_adapter: Optional[OllamaLLMAdapter] = None,
         response_controller: Optional[ResponseController] = None,
         observability_manager: Optional[ObservabilityManager] = None,
+        title_generator: Optional[ConversationTitleGenerator] = None,
     ):
         self.conv_mgr = conversation_manager or ConversationManager()
         self.ctx_mgr = context_manager or ContextManager()
@@ -50,6 +52,7 @@ class LLMOrchestrator:
         self.llm_adapter = llm_adapter or OllamaLLMAdapter()
         self.resp_ctrl = response_controller or ResponseController.get_instance()
         self.obs_mgr = observability_manager or ObservabilityManager.get_instance()
+        self.title_generator = title_generator or ConversationTitleGenerator(llm_adapter=self.llm_adapter)
 
     async def execute_turn(
         self,
@@ -334,5 +337,25 @@ class LLMOrchestrator:
             },
             timings=trace.timings.model_dump(),
         )
+
+        # 6. Check eligibility and generate title if turn 1
+        if conversation_id:
+            try:
+                if await self.conv_mgr.is_eligible_for_title_generation(conversation_id):
+                    generated_title = await self.title_generator.generate_and_update_title(
+                        conversation_id=conversation_id,
+                        first_question=question,
+                        first_answer=formatted_answer,
+                        conversation_manager=self.conv_mgr,
+                    )
+                    if generated_title:
+                        yield StreamingEngine.emit_title(
+                            request_id=req_id,
+                            conversation_id=conversation_id,
+                            title=generated_title,
+                        )
+            except Exception as e:
+                logger.warning("Streaming title generation encountered error: %s", e)
+
         self.obs_mgr.finish_trace(req_id, status="COMPLETED")
 

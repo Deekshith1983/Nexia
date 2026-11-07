@@ -38,6 +38,7 @@ from app.services.citation_manager import (
 )
 from app.services.response_controller import ResponseController
 from app.services.streaming_engine import StreamingEngine
+from app.services.title_generator import ConversationTitleGenerator
 
 logger = logging.getLogger("nexia.orchestrator")
 
@@ -207,6 +208,7 @@ class AnswerOrchestrator:
         passage_retriever: Optional[PassageRetriever] = None,
         conversation_manager: Optional[ConversationManager] = None,
         context_manager: Optional[ContextManager] = None,
+        title_generator: Optional[ConversationTitleGenerator] = None,
     ):
         self.evidence_reasoner = evidence_reasoner or EvidenceReasoner()
         self.document_cache = document_cache or DocumentCacheService()
@@ -215,10 +217,12 @@ class AnswerOrchestrator:
         self.passage_retriever = passage_retriever or PassageRetriever()
         self.conversation_manager = conversation_manager or ConversationManager()
         self.context_manager = context_manager or ContextManager()
+        self.title_generator = title_generator or ConversationTitleGenerator(llm_adapter=self.llm_adapter)
         self.llm_orchestrator = LLMOrchestrator(
             conversation_manager=self.conversation_manager,
             context_manager=self.context_manager,
             llm_adapter=self.llm_adapter,
+            title_generator=self.title_generator,
         )
 
     async def answer(self, request: AnswerRequest) -> AnswerResponse:
@@ -835,8 +839,20 @@ class AnswerOrchestrator:
                     diagnostics={"claims_verified": diagnostics.claims_verified},
                 )
                 saved_msg_id = ast_msg.id
+
+                # Trigger non-blocking title generation if eligible (turn 1 with temporary title)
+                if await self.conversation_manager.is_eligible_for_title_generation(request.conversation_id):
+                    import asyncio
+                    asyncio.create_task(
+                        self.title_generator.generate_and_update_title(
+                            conversation_id=request.conversation_id,
+                            first_question=question,
+                            first_answer=user_facing_answer,
+                            conversation_manager=self.conversation_manager,
+                        )
+                    )
             except Exception as e:
-                logger.warning("Failed to persist conversation turn: %s", e)
+                logger.warning("Failed to persist conversation turn or trigger title generation: %s", e)
 
         # 7. Assemble final AnswerResponse
         return AnswerResponse(

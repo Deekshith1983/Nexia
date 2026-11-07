@@ -1,20 +1,26 @@
-# Python
+# ==========================================
+# Python / Backend
+# ==========================================
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
+
+# Virtual environments
 env/
 venv/
 .venv/
+ENV/
+
+# Python packaging & distribution
 build/
 develop-eggs/
-dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+/lib/
+/lib64/
 parts/
 sdist/
 var/
@@ -23,17 +29,72 @@ wheels/
 .installed.cfg
 *.egg
 
-# Testing
+# Python Testing & Coverage
 .pytest_cache/
 .coverage
+.coverage.*
 htmlcov/
+.mypy_cache/
+.ruff_cache/
 
-# Environment variables
+# ==========================================
+# Frontend & Node.js
+# ==========================================
+node_modules/
+dist/
+dist-ssr/
+
+# TypeScript & Build Caches
+*.tsbuildinfo
+.tmp/
+
+# Frontend Testing & Coverage
+coverage/
+
+# Linting & Formatting Caches
+.eslintcache
+.stylelintcache
+.oxlintcache
+
+# Package Manager Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# ==========================================
+# Environment Variables & Secrets
+# ==========================================
 .env
+.env.*
 .env.local
+.env.development.local
+.env.test.local
+.env.production.local
+!.env.example
+!.env.template
 
-# IDE
+# ==========================================
+# Operating System Files
+# ==========================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# ==========================================
+# IDEs & Text Editors
+# ==========================================
 .vscode/
+!.vscode/extensions.json
 .idea/
 *.swp
 *.swo
+*~
+*.sublime-project
+*.sublime-workspace
