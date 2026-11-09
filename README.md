@@ -1,355 +1,492 @@
-# Nexia — Wikipedia-Grounded AI Knowledge Assistant
+# Nexia — Wikipedia-Grounded Conversational AI Assistant
 
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688.svg?style=flat&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
-[![React](https://img.shields.io/badge/React-19.0-61DAFB.svg?style=flat&logo=react&logoColor=black)](https://react.dev/)
-[![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178C6.svg?style=flat&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
-[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-17_%2B_pgvector-4169E1.svg?style=flat&logo=postgresql&logoColor=white)](https://www.postgresql.org/)
-[![Ollama](https://img.shields.io/badge/Ollama-Gemma_3_4B-white.svg?style=flat&logo=ollama&logoColor=black)](https://ollama.com/)
-[![Tests](https://img.shields.io/badge/Tests-100%25_Passing_(62%2F62)-brightgreen.svg?style=flat)](run_tests.py)
-[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/Python-3.12-blue.svg)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688.svg)](https://fastapi.tiangolo.com/)
+[![React](https://img.shields.io/badge/React-18.3+-61dafb.svg)](https://react.dev/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.5+-3178c6.svg)](https://www.typescriptlang.org/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-15+-336791.svg)](https://www.postgresql.org/)
+[![pgvector](https://img.shields.io/badge/pgvector-0.3+-green.svg)](https://github.com/pgvector/pgvector)
+[![Ollama](https://img.shields.io/badge/Ollama-Local_Inference-orange.svg)](https://ollama.com/)
+[![Gemma](https://img.shields.io/badge/LLM-Gemma_3_4B-purple.svg)](https://ollama.com/library/gemma3:4b)
 
-> **Nexia** is a locally hosted, production-grade, Wikipedia-grounded conversational AI agent. Engineered from first principles, Nexia pairs hybrid document retrieval (BM25 lexical search + dense pgvector embeddings) with a locally served **Gemma 3 4B** large language model running on Ollama. Nexia delivers verifiable, hallucination-resistant answers with complete evidence traceability, rigorous citation management, and a fluid, streaming React chat interface.
+Nexia is a Wikipedia-grounded conversational AI application. It combines a React and TypeScript chat interface with a FastAPI backend that retrieves information from Wikipedia, stores processed content and embeddings in PostgreSQL with pgvector, and uses locally hosted models through Ollama to generate evidence-grounded answers.
 
----
+The project is designed around a separation between **retrieval**, **evidence preparation**, and **answer generation**. The language model synthesizes an answer from retrieved context; Wikipedia remains the configured knowledge source for the documented workflow.
 
-## Author & Project Identity
-
-- **Original Author & Lead Engineer**: Deekshith1983
-- **Contact Email**: [dikideeku@gmail.com](mailto:dikideeku@gmail.com)
-- **Official GitHub Repository**: [https://github.com/Deekshith1983/Nexia](https://github.com/Deekshith1983/Nexia)
+> **Knowledge-source scope:** This README describes the Wikipedia-based knowledge workflow represented by this project. It does not imply that Nexia has general web search or access to arbitrary external knowledge sources.
 
 ---
 
-## Table of Contents
+## Contents
 
-1. [Key Architectural Highlights](#key-architectural-highlights)
-2. [End-to-End System Architecture](#end-to-end-system-architecture)
-3. [Technology Stack](#technology-stack)
-4. [Project Directory Layout](#project-directory-layout)
-5. [Core Engineering Implementations](#core-engineering-implementations)
-   - [Enforced Retrieval Configuration](#1-enforced-retrieval-configuration)
-   - [Hybrid Retrieval & Slotted Evidence Packing](#2-hybrid-retrieval--slotted-evidence-packing)
-   - [Inline Citation Stripping & Primary Source Footer](#3-inline-citation-stripping--primary-source-footer)
-   - [SSE Streaming & Unified UX ("Thinking...")](#4-sse-streaming--unified-ux-thinking)
-   - [Conversation Persistence & Dynamic Title Generation](#5-conversation-persistence--dynamic-title-generation)
-   - [Admission Control, Rate Limiting & Concurrency](#6-admission-control-rate-limiting--concurrency)
-6. [Prerequisites & System Requirements](#prerequisites--system-requirements)
-7. [Installation & Setup](#installation--setup)
-8. [Running the Application](#running-the-application)
-9. [Automated Testing Suite](#automated-testing-suite)
-10. [REST API Documentation](#rest-api-documentation)
-11. [Configuration Reference](#configuration-reference)
-12. [Contributing & Development Workflow](#contributing--development-workflow)
-13. [License](#license)
-
----
-
-## Key Architectural Highlights
-
-- **100% Local Inference & Privacy**: Zero external LLM API dependency. Inference is powered by local Ollama serving Google's `gemma3:4b` and embeddings via `nomic-embed-text`.
-- **Hybrid Retrieval Pipeline**: Combines BM25 Okapi lexical scoring with dense vector similarity via PostgreSQL `pgvector`, joined through dynamic reciprocal-rank fusion and slotted passage ranking.
-- **Strict Evidence Grounding**: Hallucination suppression via strict contextual constraints. The model is permitted to formulate assertions only from verified Wikipedia passages.
-- **Zero-Pollution Prose Generation**: Eliminates unsightly internal citation tags (`[k]`, `[1]`, `[source]`) during stream generation using regex lookbehind filters, appending a single primary Wikipedia hyperlinked citation footer at the close of synthesis.
-- **Unified User Experience**: Clean, minimalist "Thinking..." status indicator without exposing internal pipeline state or technical retrieval jargon.
-- **Hardware-Aware Admission Control**: Queue-bounded admission manager (`ResponseController`) prevents Ollama CPU saturation and memory thrashing on modest consumer hardware (e.g., Ryzen 5, 16GB RAM).
-- **Consolidated Test Automation**: Single unified test runner (`run_tests.py`) verifying 62 unit and integration tests across backend and frontend with a 100% pass rate.
+1. [Overview](#1-overview)
+2. [Features](#2-features)
+3. [Technology stack](#3-technology-stack)
+4. [Architecture](#4-architecture)
+5. [How a question is processed](#5-how-a-question-is-processed)
+6. [Repository layout](#6-repository-layout)
+7. [Prerequisites](#7-prerequisites)
+8. [Installation and setup](#8-installation-and-setup)
+9. [Run Nexia](#9-run-nexia)
+10. [Testing](#10-testing)
+11. [API overview](#11-api-overview)
+12. [Retrieval configuration](#12-retrieval-configuration)
+13. [Engineering decisions](#13-engineering-decisions)
+14. [Known limitations and future work](#14-known-limitations-and-future-work)
+15. [Contributing](#15-contributing)
+16. [Development workflow](#16-development-workflow)
+17. [License](#17-license)
+18. [Author and attribution](#18-author-and-attribution)
 
 ---
 
-## End-to-End System Architecture
+## 1. Overview
 
-```mermaid
-flowchart TD
-    subgraph Frontend["Frontend Client (React 19 + TypeScript + Vite)"]
-        UI["Chat Interface (ChatWindow / MessageBubble)"]
-        Sidebar["Conversation Sidebar (Virtual List)"]
-        Store["State Management (Zustand: chatStore)"]
-        StreamClient["SSE Stream Consumer (useChatStream)"]
-    end
+Nexia provides a conversational interface for asking questions against a Wikipedia-based knowledge collection. Instead of relying only on the language model's pretrained knowledge, the backend retrieves relevant article content, selects passages, and supplies that evidence as context for answer generation.
 
-    subgraph Gateway["FastAPI Web Layer (Port 8000)"]
-        CORSMiddleware["CORS & Request Middleware"]
-        RateLimiter["TokenBucket Rate Limiter"]
-        AdmissionMgr["ResponseController (Admission Queue)"]
-        Routes_Conv["/api/v1/conversations"]
-        Routes_Answer["/api/v1/retrieval/answer/stream"]
-    end
+The application has three main responsibilities:
 
-    subgraph Services["Core Backend Services"]
-        ConvMgr["ConversationManager (PostgreSQL + pgvector)"]
-        AnswerOrch["AnswerOrchestrator"]
-        ContextMgr["ContextBudgetManager (Sliding Window)"]
-        CitationMgr["CitationManager (Single Primary Link)"]
-        TitleGen["Dynamic TitleGenerator (Atomic Task)"]
-    end
+- **Frontend:** provides the chat experience, conversation navigation, message rendering, and streaming response presentation.
+- **Backend:** interprets requests, retrieves and prepares evidence, coordinates local model inference, validates/formats responses, and manages conversation operations.
+- **Data and model services:** PostgreSQL stores application data and retrieved content; pgvector supports vector similarity retrieval; Ollama serves the configured language and embedding models.
 
-    subgraph RetrievalEngine["Staged Retrieval Engine"]
-        WikiFetcher["Wikipedia Ingestion & Section Parser"]
-        HybridSearch["Hybrid Searcher (BM25 + pgvector)"]
-        EvidencePacker["Slotted Evidence Collector"]
-    end
+Nexia is intended to run locally. The documented model integration uses Ollama with `gemma3:4b` for answer generation and `nomic-embed-text` for embeddings.
 
-    subgraph LocalLLM["Local Ollama Service (Port 11434)"]
-        Embedder["nomic-embed-text (768-dim)"]
-        GemmaLLM["gemma3:4b (CPU-Optimized Inference)"]
-    end
+## 2. Features
 
-    %% Interactions
-    UI -->|1. Submit Query| StreamClient
-    StreamClient -->|2. POST /api/v1/retrieval/answer/stream| AdmissionMgr
-    AdmissionMgr --> RateLimiter
-    RateLimiter --> Routes_Answer
-    Routes_Answer --> AnswerOrch
+The following describes the capabilities represented in the supplied project documentation. Confirm the current implementation and configuration when changing or extending these features.
 
-    AnswerOrch -->|Fetch History & Budget| ConvMgr
-    AnswerOrch --> ContextMgr
-    AnswerOrch -->|Retrieve Passages| WikiFetcher
-    WikiFetcher --> HybridSearch
-    HybridSearch -->|Dense Vector Query| Embedder
-    HybridSearch --> EvidencePacker
+### Conversational interface
 
-    EvidencePacker -->|Pack Top Passages| AnswerOrch
-    AnswerOrch -->|Prompt with Grounded Context| GemmaLLM
-    GemmaLLM -->|Stream Raw Tokens| AnswerOrch
-    AnswerOrch -->|Filter [k] Tokens & Clean Prose| CitationMgr
-    CitationMgr -->|Append Primary Wikipedia Footer| Routes_Answer
-    Routes_Answer -->|SSE Events: chunk, metadata, done| StreamClient
-    StreamClient --> Store
-    Store --> UI
+- GPT-style chat interface built with React and TypeScript.
+- Responsive layout with conversation navigation.
+- Conversation creation, listing, retrieval, renaming, and deletion through backend APIs.
+- Progressive answer delivery through Server-Sent Events (SSE), where the streaming endpoint is used.
+- Markdown-based answer presentation, including formatted text and links.
 
-    Routes_Conv --> ConvMgr
-    ConvMgr -->|Trigger First Turn| TitleGen
-    TitleGen --> GemmaLLM
-    TitleGen -->|Atomic Update| ConvMgr
-    Sidebar -->|Query Conversations| Routes_Conv
-```
+### Wikipedia retrieval and evidence preparation
+
+- Wikipedia article discovery and retrieval.
+- Article content processing and passage chunking.
+- Persistent document and passage storage in PostgreSQL.
+- Text embeddings generated through Ollama.
+- Lexical retrieval using BM25.
+- Semantic retrieval using pgvector.
+- Hybrid ranking that combines lexical and vector retrieval.
+- Evidence selection and packing before answer generation.
+
+### Grounded answer generation
+
+- Local answer generation through Ollama.
+- Evidence-aware prompt construction.
+- Answer verification using the existing grounding/claim-validation components.
+- A single relevant Wikipedia article hyperlink appended at the end of a completed answer, when valid source metadata is available.
+
+### Operational capabilities
+
+- Centralized retrieval configuration for question-answering requests.
+- Normal and streaming answer endpoints.
+- Conversation persistence.
+- Health endpoint for checking backend availability.
 
 ---
 
-## Technology Stack
+## 3. Technology stack
 
-### Backend
-- **Language**: Python 3.12+
-- **Web Framework**: FastAPI 0.115+
-- **ASGI Server**: Uvicorn with async event loops
-- **Database ORM**: SQLAlchemy 2.0 (asyncio + asyncpg driver)
-- **Vector Database**: PostgreSQL 17 + `pgvector` extension
-- **Inference Server**: Ollama (local daemon)
-- **Language Model**: Google `gemma3:4b`
-- **Embedding Model**: `nomic-embed-text` (768 dimensions)
-- **Information Retrieval**: `rank-bm25` (lexical) + cosine distance vector search (dense)
-- **Validation & Serialization**: Pydantic v2
-- **Testing**: `pytest`, `pytest-asyncio`, `httpx`
+The versions below reflect the versions or minimum versions stated in the supplied project documentation. The dependency manifests and lockfiles should be treated as authoritative if they differ.
 
 ### Frontend
-- **Framework**: React 19 + TypeScript
-- **Build Tool**: Vite 6 (ESM bundler)
-- **State Store**: Zustand (lightweight global state with selective subscriptions)
-- **Server Cache & Sync**: TanStack Query v5
-- **Styling**: Tailwind CSS + Shadcn/UI primitives
-- **Virtualization**: `@tanstack/react-virtual` (for large chat and sidebar lists)
-- **Markdown & Code**: `react-markdown`, `remark-gfm`, `rehype-highlight`
-- **Icons**: Lucide React
-- **Testing**: Vitest, React Testing Library, JSDOM
+
+| Area | Technology | Responsibility |
+|---|---|---|
+| UI framework | React 18 | Component-based user interface |
+| Language | TypeScript 5.5+ | Typed frontend code and API contracts |
+| Build tool | Vite 6 | Development server and production build |
+| Styling | Tailwind CSS 3.4+ | Utility-based styling |
+| UI state | Zustand 5 | Client-side interface state |
+| Server state | TanStack Query 5 | API data fetching and cache synchronization |
+| Icons | Lucide React | Interface icons |
+| Markdown | React Markdown and Rehype | Rendering generated Markdown |
+| Frontend tests | Vitest and React Testing Library | Component and frontend behavior tests |
+
+### Backend
+
+| Area | Technology | Responsibility |
+|---|---|---|
+| Language | Python 3.12+ | Backend implementation |
+| API framework | FastAPI | HTTP API and streaming responses |
+| Validation | Pydantic v2 | Request and response validation |
+| ORM | SQLAlchemy 2 | Database models and database access |
+| PostgreSQL driver | asyncpg | Asynchronous PostgreSQL connectivity |
+| NLP | spaCy | Linguistic analysis and entity extraction |
+| Backend tests | pytest and pytest-asyncio | Backend unit and integration tests |
+
+### Database and AI
+
+| Area | Technology | Responsibility |
+|---|---|---|
+| Relational database | PostgreSQL 15+ | Conversations, messages, documents, and related records |
+| Vector extension | pgvector | Storage and similarity search for embeddings |
+| Model runtime | Ollama | Local model serving |
+| Answer model | `gemma3:4b` | Answer generation |
+| Embedding model | `nomic-embed-text` | Text and query embeddings |
+| Lexical retrieval | BM25 | Keyword-based passage retrieval |
+| Hybrid ranking | BM25 + vector retrieval | Combines lexical and semantic relevance |
 
 ---
 
-## Project Directory Layout
+## 4. Architecture
+
+Nexia uses a frontend/backend architecture. The frontend sends user questions to the FastAPI backend. The backend prepares evidence from the configured Wikipedia knowledge source, invokes the local model through Ollama, and returns a response to the frontend.
+
+### Request and response sequence
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant UI as React frontend
+    participant API as FastAPI
+    participant Store as PostgreSQL / pgvector
+    participant Wiki as Wikipedia
+    participant Ollama as Ollama
+    participant Verify as Validation and formatting
+
+    User->>UI: Submit a question
+    UI->>API: Send answer request
+    API->>API: Validate retrieval configuration
+    API->>Store: Look up available article data
+
+    alt Required article data is missing
+        API->>Wiki: Retrieve article content
+        Wiki-->>API: Article content
+        API->>API: Process and chunk content
+        API->>Ollama: Generate embeddings
+        Ollama-->>API: Embeddings
+        API->>Store: Persist documents, chunks, and embeddings
+    end
+
+    API->>Store: Retrieve lexical and vector candidates
+    Store-->>API: Candidate passages
+    API->>API: Rank and prepare evidence
+    API->>Ollama: Generate answer using evidence
+    Ollama-->>API: Generated answer
+    API->>Verify: Validate and format answer
+    Verify-->>API: Clean answer and final article link
+    API->>Store: Persist conversation turn
+    API-->>UI: Return answer or stream response
+    UI-->>User: Display answer and final citation
+```
+
+The diagrams describe the intended documented flow. Exact internal sequencing can vary with cache hits, streaming behavior, and the implementation of individual services.
+
+---
+
+### Main architectural responsibilities
+
+**Frontend**
+- Collects user questions.
+- Manages chat and conversation interactions.
+- Calls the backend API.
+- Displays normal and streamed responses.
+- Renders Markdown and the final article hyperlink.
+
+**FastAPI backend**
+- Exposes health, conversation, and answer-generation endpoints.
+- Validates incoming requests.
+- Coordinates retrieval, evidence preparation, inference, and response formatting.
+- Handles streaming and cancellation routes where implemented.
+
+**Retrieval layer**
+- Analyzes the question.
+- Identifies relevant entities or sub-questions.
+- Retrieves candidate passages using lexical and vector search.
+- Ranks, filters, and packs evidence for the language model.
+
+**PostgreSQL and pgvector**
+- Persist conversations and messages.
+- Store retrieved article content and passage data.
+- Store embeddings for semantic retrieval.
+
+**Ollama**
+- Provides local model inference.
+- Serves the configured answer-generation and embedding models.
+
+### Request and response sequence
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant UI as React frontend
+    participant API as FastAPI
+    participant Store as PostgreSQL / pgvector
+    participant Wiki as Wikipedia
+    participant Ollama as Ollama
+    participant Verify as Validation and formatting
+
+    User->>UI: Submit a question
+    UI->>API: Send answer request
+    API->>API: Validate retrieval configuration
+    API->>Store: Look up available article data
+
+    alt Required article data is missing
+        API->>Wiki: Retrieve article content
+        Wiki-->>API: Article content
+        API->>API: Process and chunk content
+        API->>Ollama: Generate embeddings
+        Ollama-->>API: Embeddings
+        API->>Store: Persist documents, chunks, and embeddings
+    end
+
+    API->>Store: Retrieve lexical and vector candidates
+    Store-->>API: Candidate passages
+    API->>API: Rank and prepare evidence
+    API->>Ollama: Generate answer using evidence
+    Ollama-->>API: Generated answer
+    API->>Verify: Validate and format answer
+    Verify-->>API: Clean answer and final article link
+    API->>Store: Persist conversation turn
+    API-->>UI: Return answer or stream response
+    UI-->>User: Display answer and final citation
+```
+
+The diagrams describe the intended documented flow. Exact internal sequencing can vary with cache hits, streaming behavior, and the implementation of individual services.
+
+---
+
+## 5. How a question is processed
+
+The following is the end-to-end workflow described for Nexia.
+
+1. **Question submission**  
+   The user enters a question in the React interface. The frontend sends it to the FastAPI answer endpoint, either as a normal request or through the streaming endpoint.
+
+2. **Request validation and retrieval configuration**  
+   The backend validates the request and applies the configured retrieval limits.
+
+3. **Question analysis**  
+   The backend analyzes the question to identify its intent, important entities, relationships, or sub-questions. The query-planning layer can decompose complex questions when needed.
+
+4. **Knowledge lookup**  
+   The backend checks whether the relevant Wikipedia article content is already available in the local database.
+
+5. **Wikipedia retrieval and ingestion**  
+   If required content is unavailable, the backend retrieves the relevant article content, processes it, divides it into passages, and prepares embeddings.
+
+6. **Persistence**  
+   Article data, passages, and embeddings are stored in PostgreSQL and pgvector for subsequent retrieval.
+
+7. **Hybrid retrieval**  
+   The retrieval layer combines lexical BM25 matching with vector similarity search to identify relevant passages.
+
+8. **Evidence ranking and packing**  
+   Candidate passages are ranked, filtered, and packed into a bounded evidence context.
+
+9. **Grounded prompt construction**  
+   The backend constructs a prompt containing the question and selected evidence.
+
+10. **Local answer generation**  
+    Ollama runs the configured language model to generate an answer from the supplied context.
+
+11. **Validation and response formatting**  
+    The backend applies its answer-validation and citation-formatting logic. Internal evidence markers should not appear in the user-facing prose.
+
+12. **Final article citation**  
+    When valid source metadata is available, the response includes one relevant Wikipedia article hyperlink at the end of the answer.
+
+13. **Delivery and persistence**  
+    The backend returns the completed answer or streams it to the frontend. Conversation data is persisted so that it can be retrieved later.
+
+---
+
+## 6. Repository layout
+
+The following is the repository structure described in the supplied project documentation. Update this tree if the actual repository has changed.
 
 ```text
 Nexia/
 ├── backend/
 │   ├── app/
 │   │   ├── api/
-│   │   │   ├── routes/
-│   │   │   │   ├── conversations.py       # Conversation management CRUD endpoints
-│   │   │   │   ├── health.py              # Health check and telemetry routes
-│   │   │   │   └── retrieval.py           # Synchronous & SSE streaming answer endpoints
-│   │   │   └── dependencies.py            # FastAPI dependency injections
+│   │   │   ├── middleware/
+│   │   │   └── routes/
 │   │   ├── core/
-│   │   │   ├── config.py                  # Pydantic BaseSettings environment config
-│   │   │   └── database.py                # Async SQLAlchemy engine & session maker
-│   │   ├── models/
-│   │   │   ├── conversation.py            # Conversation & Message database models
-│   │   │   └── document.py                # Document, Section & Passage pgvector models
+│   │   ├── db/
 │   │   ├── retrieval/
-│   │   │   ├── adaptive_nlp.py            # Query decomposition & intent classification
-│   │   │   ├── evidence_collector.py      # Slotted passage packing & reranking
-│   │   │   ├── hybrid_search.py           # BM25 + pgvector Reciprocal Rank Fusion
-│   │   │   ├── passage_ranker.py          # Lexical/semantic passage similarity ranker
-│   │   │   └── wiki_fetcher.py            # Wikipedia API client & section tree parser
 │   │   ├── schemas/
-│   │   │   ├── conversation.py            # Conversation DTOs & response contracts
-│   │   │   └── retrieval.py               # Enforced retrieval configuration contracts
 │   │   ├── services/
-│   │   │   ├── answer_orchestrator.py     # Master coordinator for retrieval & generation
-│   │   │   ├── cache_service.py           # In-memory and tiered caching layer
-│   │   │   ├── citation_manager.py        # Single primary Wikipedia footer formatter
-│   │   │   ├── context_budget_manager.py  # Sliding conversation memory token budgeting
-│   │   │   ├── conversation_manager.py    # PostgreSQL repository for chat history
-│   │   │   ├── llm_orchestrator.py        # Ollama client with streaming citation filter
-│   │   │   ├── rate_limiter.py            # In-memory TokenBucket rate limiter
-│   │   │   ├── response_controller.py     # Bounded queue inference admission manager
-│   │   │   └── title_generator.py         # Autonomous LLM-based title summarizer
-│   │   └── main.py                        # FastAPI application entrypoint & lifespan
+│   │   └── main.py
+│   ├── deploy/
 │   ├── tests/
-│   │   ├── conftest.py                    # Pytest async fixtures & DB engine disposal
-│   │   └── test_nexia.py                  # Consolidated backend test suite (40 tests)
-│   ├── .env.example                       # Backend configuration blueprint
-│   ├── README.md                          # Backend-specific architecture guide
-│   └── requirements.txt                   # Pinned backend dependencies
+│   │   └── test_nexia.py
+│   ├── requirements.txt
+│   └── .env.example
 ├── frontend/
+│   ├── public/
 │   ├── src/
-│   │   ├── components/ui/                 # Shadcn/Tailwind reusable UI elements
+│   │   ├── components/
 │   │   ├── config/
-│   │   │   └── retrieval.ts               # Shared RETRIEVAL_CONFIG enforcement constant
-│   │   ├── features/
-│   │   │   ├── chat/
-│   │   │   │   ├── ChatWindow.tsx         # Main chat viewport with virtualization
-│   │   │   │   ├── MessageBubble.tsx      # Clean markdown renderer & footer display
-│   │   │   │   ├── ThinkingIndicator.tsx  # Unified "Thinking..." component
-│   │   │   │   └── useChatStream.ts       # SSE event consumer hook
-│   │   │   └── sidebar/
-│   │   │       ├── ConversationItem.tsx   # Individual conversation row (select/edit/del)
-│   │   │       ├── ConversationList.tsx   # Deduplicated sidebar list
-│   │   │       └── Sidebar.tsx            # Left navigational collapsible sidebar
+│   │   ├── hooks/
 │   │   ├── services/
-│   │   │   ├── api.ts                     # Centralized API client & payload builder
-│   │   │   └── conversation.service.ts    # REST service for conversations
-│   │   ├── store/
-│   │   │   └── chatStore.ts               # Zustand store for messages, state & telemetry
-│   │   └── test/
-│   │       ├── setup.ts                   # Vitest matchers & mock setups
-│   │       └── nexia.test.tsx             # Consolidated frontend test suite (22 tests)
-│   ├── package.json                       # Frontend scripts & dependencies
-│   ├── vite.config.ts                     # Bundler config & proxy routing
-│   └── README.md                          # Frontend architecture guide
-├── docs/
-│   └── GITHUB_ISSUES.md                   # Prepared engineering backlog & roadmap issues
-├── run_tests.py                           # Master unified test runner (Backend + Frontend)
-├── .gitignore                             # Monorepo-wide ignore rules
-└── README.md                              # Root comprehensive project manual
+│   │   ├── stores/
+│   │   ├── test/
+│   │   ├── types/
+│   │   ├── utils/
+│   │   ├── App.tsx
+│   │   └── main.tsx
+│   ├── package.json
+│   ├── tailwind.config.js
+│   ├── tsconfig.json
+│   └── vite.config.ts
+├── run_tests.py
+├── GITHUB_ISSUES_BACKLOG.md
+├── .gitignore
+└── README.md
 ```
+
+### Important directories
+
+| Path | Purpose |
+|---|---|
+| `backend/app/api/` | HTTP routes and middleware |
+| `backend/app/core/` | Application settings and shared infrastructure |
+| `backend/app/db/` | Database models, connections, and persistence |
+| `backend/app/retrieval/` | Question analysis and retrieval planning |
+| `backend/app/schemas/` | Pydantic request and response schemas |
+| `backend/app/services/` | Retrieval, inference, orchestration, and citation services |
+| `frontend/src/components/` | Chat interface and reusable UI components |
+| `frontend/src/config/` | Frontend configuration |
+| `frontend/src/hooks/` | Reusable React hooks |
+| `frontend/src/services/` | Backend API and streaming clients |
+| `frontend/src/stores/` | Client-side state |
+| `frontend/src/test/` | Frontend test setup and test files |
 
 ---
 
-## Core Engineering Implementations
+## 7. Prerequisites
 
-### 1. Enforced Retrieval Configuration
+Install the following before setting up Nexia.
 
-To guarantee predictable memory consumption and retrieval precision, both the backend Pydantic models (`backend/app/schemas/retrieval.py`) and the frontend API layer (`frontend/src/config/retrieval.ts`) strictly enforce the following retrieval contract:
+| Requirement | Documented version | Purpose |
+|---|---:|---|
+| Python | 3.12+ | Backend runtime |
+| Node.js | 18+ | Frontend tooling |
+| npm | Version compatible with the installed Node.js | Frontend dependencies |
+| PostgreSQL | 15+ | Persistent storage |
+| pgvector | 0.3+ | Vector storage and similarity search |
+| Ollama | 0.4+ | Local model runtime |
+| Git | Recent version | Source control |
 
-```json
-{
-  "top_k_per_document": 3,
-  "min_confidence": 0.4,
-  "max_evidence_passages": 9
-}
-```
-
-- **Frontend Enforcement**: `api.ts` merges `RETRIEVAL_CONFIG` *after* any caller arguments, preventing individual React components from overriding or degrading search parameters.
-- **Backend Validation**: Pydantic schema validation sets these as defaults and rejects requests exceeding `max_evidence_passages = 9`.
-
-### 2. Hybrid Retrieval & Slotted Evidence Packing
-
-The retrieval engine (`backend/app/retrieval/`) operates through a four-stage pipeline:
-1. **Wikipedia Acquisition**: Real-time Wikipedia page and section tree extraction via Wikipedia REST APIs (`wiki_fetcher.py`).
-2. **Dense & Sparse Ingestion**: Parallel computation of sparse BM25 indices and 768-dimensional dense embeddings via `nomic-embed-text`.
-3. **Reciprocal Rank Fusion (RRF)**: Merges rank positions across lexical and vector candidates to counter semantic drift.
-4. **Slotted Evidence Collector** (`evidence_collector.py`): Allocates fixed passage slots (max 3 per document, up to 9 total) based on composite confidence scores, ensuring broad topical diversity without monopolization by a single verbose article.
-
-### 3. Inline Citation Stripping & Primary Source Footer
-
-- **Zero Inline Markers**: Local models frequently produce bracketed markers like `[k]`, `[1]`, or `[source]`. Nexia enforces clean prose generation via two complementary mechanisms:
-  1. *Negative System Prompting*: Explicit instructions forbidding internal evidence markers.
-  2. *StreamingCitationFilter* (`llm_orchestrator.py`): A regex-backed sliding window filter that buffers partial token streams, identifies, and strips bracketed markers on the fly before SSE dispatch.
-- **Single Primary Source Footer**: At the conclusion of generation, `citation_manager.py` selects the single highest-scoring, verified Wikipedia article and appends a single markdown hyperlinked reference:
-  ```markdown
-  [Albert Einstein](https://en.wikipedia.org/wiki/Albert_Einstein)
-  ```
-- No other citations appear in the body of the generated prose.
-
-### 4. SSE Streaming & Unified UX ("Thinking...")
-
-- **Server-Sent Events (`/api/v1/retrieval/answer/stream`)**: Dispatches real-time structured events:
-  - `event: status` -> `"Thinking..."`
-  - `event: chunk` -> `{"text": "..."}`
-  - `event: metadata` -> `{"article_title": "...", "article_url": "..."}`
-  - `event: done` -> Finalization signal
-- **Unified UX**: Technical backend pipeline stages (e.g., "Extracting BM25 tokens", "Generating embeddings") are masked from the user. The UI displays exclusively `Thinking...` until the first token stream begins, adhering strictly to clean consumer UX standards.
-
-### 5. Conversation Persistence & Dynamic Title Generation
-
-- **PostgreSQL Persistence**: Complete thread history stored in `conversations` and `messages` tables with cascade deletion.
-- **Dynamic Atomic Title Generation**: On the first turn of a new conversation, `title_generator.py` asynchronously generates a concise, 3-to-5 word title using Gemma 3 4B, updating the database atomically without blocking the primary streaming answer.
-- **Context Budget Manager**: Employs a sliding-window token budgeter (`context_budget_manager.py`) to prune historical conversation turns when context nears model capacity (`LLM_NUM_CTX=6144`).
-
-### 6. Admission Control, Rate Limiting & Concurrency
-
-- **In-Memory Token Bucket** (`rate_limiter.py`): Protects answer generation and conversation CRUD against abuse.
-- **ResponseController** (`response_controller.py`): Enforces an inference concurrency limit (`INFERENCE_MAX_ACTIVE=1`) with a bounded queue (`INFERENCE_MAX_QUEUE=3`). Additional requests wait up to 30 seconds or receive `HTTP 429 / 503` graceful backoff signals, preventing GPU/CPU memory crashes.
+The documented local model setup uses `gemma3:4b` and `nomic-embed-text`. Model memory and inference speed depend on the machine and the Ollama configuration.
 
 ---
 
-## Prerequisites & System Requirements
+## 8. Installation and setup
 
-- **Operating System**: Windows 10/11, macOS, or Linux
-- **Python**: Version 3.12 or newer
-- **Node.js**: Version 18.0 or newer (Node 20+ recommended)
-- **PostgreSQL**: Version 16 or 17 with the `pgvector` extension installed
-- **Ollama**: Local Ollama runtime installed and added to system PATH
-
-### Pulling Ollama Models
-
-Ensure Ollama is running (`ollama serve`), then pull the required models:
-
-```bash
-ollama pull gemma3:4b
-ollama pull nomic-embed-text
-```
-
----
-
-## Installation & Setup
-
-### 1. Clone the Repository
+### 8.1 Clone the repository
 
 ```bash
 git clone https://github.com/Deekshith1983/Nexia.git
 cd Nexia
 ```
 
-### 2. Configure Backend Environment
+### 8.2 Set up PostgreSQL and pgvector
 
-Copy the blueprint configuration and adjust database credentials as needed:
+Install PostgreSQL and ensure the pgvector extension is available to your PostgreSQL installation.
+
+Create the database:
+
+```sql
+CREATE DATABASE nexia;
+```
+
+Connect to the database and enable the vector extension:
+
+```sql
+\c nexia
+CREATE EXTENSION IF NOT EXISTS vector;
+```
+
+Use the database initialization or migration process provided by the backend. Do not assume that creating the database alone creates all application tables.
+
+### 8.3 Install Ollama and download models
+
+Install [Ollama](https://ollama.com/), then download the documented models:
+
+```bash
+ollama pull gemma3:4b
+ollama pull nomic-embed-text
+```
+
+Check that the models are available:
+
+```bash
+ollama list
+```
+
+The default Ollama service is commonly available at:
+
+```text
+http://localhost:11434
+```
+
+### 8.4 Set up the backend
+
+Create a virtual environment from the repository root:
+
+**Windows PowerShell**
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+```
+
+**Linux/macOS**
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+Install backend dependencies:
+
+```bash
+pip install -r backend/requirements.txt
+```
+
+If the configured NLP pipeline requires the spaCy English model, install it:
+
+```bash
+python -m spacy download en_core_web_sm
+```
+
+Create the local environment file:
+
+**Windows PowerShell**
+
+```powershell
+Copy-Item backend/.env.example backend/.env
+```
+
+**Linux/macOS**
 
 ```bash
 cp backend/.env.example backend/.env
 ```
 
-Ensure your PostgreSQL instance contains a database named `nexiav01` with the `vector` extension enabled:
+Review `backend/.env.example` and configure the values required by the current backend settings. The following illustrates the principal connection settings; use the exact variable names expected by the application:
 
-```sql
-CREATE DATABASE nexiav01;
-\c nexiav01;
-CREATE EXTENSION IF NOT EXISTS vector;
+```env
+DATABASE_URL=postgresql+asyncpg://postgres:your_password@localhost:5432/nexia
+OLLAMA_BASE_URL=http://localhost:11434
+LLM_MODEL=gemma3:4b
+EMBEDDING_MODEL=nomic-embed-text
 ```
 
-### 3. Setup Python Virtual Environment
+Replace the example database credentials with your own local values. Never commit a real `.env` file or credentials.
 
-```bash
-python -m venv .venv
+### 8.5 Set up the frontend
 
-# On Windows PowerShell:
-.\.venv\Scripts\Activate.ps1
-
-# On Linux/macOS:
-source .venv/bin/activate
-
-pip install -r backend/requirements.txt
-```
-
-### 4. Setup Frontend Dependencies
+From the repository root:
 
 ```bash
 cd frontend
@@ -357,285 +494,283 @@ npm install
 cd ..
 ```
 
+Use the package scripts defined in `frontend/package.json` for development, testing, and production builds.
+
 ---
 
-## Running the Application
+## 9. Run Nexia
 
-### 1. Start the Backend Server
+Start PostgreSQL and Ollama before starting the application.
 
-From the repository root (with virtual environment active):
+### 9.1 Verify Ollama models
 
 ```bash
-uvicorn app.main:app --app-dir backend --reload --host 0.0.0.0 --port 8000
+ollama list
 ```
 
-- **Health Endpoint**: `http://localhost:8000/health`
-- **Swagger Documentation**: `http://localhost:8000/docs`
-- **OpenAPI JSON**: `http://localhost:8000/openapi.json`
+Confirm that `gemma3:4b` and `nomic-embed-text` are available.
 
-### 2. Start the Frontend Development Server
+### 9.2 Start the backend
 
-In a separate terminal:
+Activate the Python virtual environment, then run the FastAPI application from the repository root.
+
+**Windows PowerShell**
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+$env:PYTHONPATH = "backend"
+uvicorn app.main:app --app-dir backend --reload --port 8000
+```
+
+**Linux/macOS**
+
+```bash
+source .venv/bin/activate
+PYTHONPATH=backend uvicorn app.main:app --app-dir backend --reload --port 8000
+```
+
+Backend URLs documented for the application:
+
+- Health check: `http://localhost:8000/health`
+- Interactive API documentation: `http://localhost:8000/docs`
+
+
+
+### 9.3 Start the frontend
+
+Open another terminal:
 
 ```bash
 cd frontend
 npm run dev
 ```
 
-- **Web Application**: Access `http://localhost:5173` in your browser.
-- Vite automatically proxies `/api` and `/health` requests to `http://localhost:8000`.
+Open the local URL printed by Vite. The documented default is:
 
-### 3. Production Frontend Build
+```text
+http://localhost:5173
+```
 
-To build and verify the static assets:
+---
+
+## 10. Testing
+
+The supplied project documentation describes test runner intended to run backend tests, frontend tests, and the frontend production build.
+
+
+The documented test commands are:
+
+**Backend**
+
+```bash
+pytest backend/tests/test_nexia.py -v
+```
+
+**Frontend**
+
+```bash
+npm --prefix frontend test
+```
+
+**Frontend production build**
 
 ```bash
 npm --prefix frontend run build
 ```
 
+### Areas to verify
+
+- Backend startup and health endpoint.
+- Conversation operations and message persistence.
+- Question analysis and retrieval behavior.
+- BM25 and vector retrieval integration.
+- Evidence selection and passage limits.
+- Retrieval configuration enforcement.
+- Answer generation and response formatting.
+- Suppression of internal citation markers.
+- Final article hyperlink formatting.
+- Streaming event handling.
+- Frontend chat and conversation behavior.
+- Frontend TypeScript compilation and production build.
+
+Some integration tests may require PostgreSQL, pgvector, Ollama, downloaded models, or network access to Wikipedia. Configure a dedicated test environment and avoid pointing tests at production data.
+
+> **Test inventory note:** A single command to run the project tests is different from having only one physical test file. The runner may invoke separate backend and frontend test suites because they use different runtimes and test frameworks. Keep the test organization that exists in the repository and use the unified command for full verification.
+
 ---
 
-## Automated Testing Suite
+## 11. API overview
 
-Nexia includes a consolidated test suite containing **62 tests** (40 backend, 22 frontend) spanning all functional, performance, and UI layers.
+The following routes are documented as frontend-facing application endpoints. Check the live FastAPI OpenAPI page at `http://localhost:8000/docs` for the authoritative request and response schemas.
 
-### Run All Tests via Unified Runner
+All versioned application routes use the `/api/v1` prefix unless otherwise noted.
 
-Execute both backend and frontend test suites with formatted summary reporting:
+### Health and metrics
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `GET` | `/health` | Check backend availability |
+| `GET` | `/api/v1/metrics` | Retrieve application metrics, if enabled |
+
+### Conversations
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `GET` | `/api/v1/conversations` | List conversations |
+| `POST` | `/api/v1/conversations` | Create a conversation |
+| `GET` | `/api/v1/conversations/{conversation_id}` | Retrieve a conversation |
+| `PATCH` | `/api/v1/conversations/{conversation_id}` | Update or rename a conversation |
+| `DELETE` | `/api/v1/conversations/{conversation_id}` | Delete a conversation |
+
+### Answer generation
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `POST` | `/api/v1/retrieval/answer` | Request a non-streaming answer |
+| `POST` | `/api/v1/retrieval/answer/stream` | Request an answer using SSE streaming |
+| `POST` | `/api/v1/retrieval/cancel/{request_id}` | Request cancellation of an active generation |
+
+The answer endpoints use the backend's request schema. Consult `/docs` for the exact fields and response structures rather than relying on assumptions in client code.
+
+---
+
+
+## 12. Engineering decisions
+
+### Retrieval and generation are separate responsibilities
+
+The retrieval layer finds and ranks source material. The language model generates a response using the prepared evidence. This separation makes it possible to inspect and improve retrieval without replacing the answer-generation component.
+
+### Wikipedia is the configured knowledge source
+
+The documented workflow retrieves article content from Wikipedia and stores processed material locally for subsequent use. The scope of answers is therefore bounded by the retrieved content and the coverage of the configured source.
+
+### Local model inference
+
+Ollama provides the model runtime for answer generation and embeddings. This avoids requiring a hosted LLM API for the documented local workflow. Wikipedia retrieval still requires network access when article content is not already available locally.
+
+### One final article link
+
+The user-facing answer is intended to contain clean prose followed by one relevant Wikipedia article hyperlink at the end. The link should come from retrieved article metadata, not from an invented model-generated URL.
+
+### Shared answer preparation
+
+Normal and streaming answer paths should use the same question analysis, retrieval, evidence preparation, and validation logic. Only the delivery mechanism should differ.
+
+---
+
+## 13. Known limitations and future work
+
+The following are areas to assess as the project evolves. They are not claims that these capabilities are already implemented.
+
+- **Knowledge-source coverage:** Wikipedia coverage and article quality determine what evidence can be retrieved.
+- **Local inference performance:** Generation speed depends on hardware, model size, context length, and Ollama configuration.
+- **Single-instance coordination:** In-memory queues or rate limits, if used, apply only within the process that owns them. Multi-worker deployments need shared coordination.
+- **Retrieval quality:** Complex, ambiguous, or multi-hop questions may require further improvements to query planning, ranking, and evidence coverage.
+- **Operational monitoring:** Production deployments may benefit from more extensive metrics, tracing, and alerting.
+- **Deployment hardening:** Reverse proxy, TLS, process supervision, backups, and resource limits should be configured for any public deployment.
+
+---
+
+## 14. Contributing
+
+Contributions should preserve Nexia's existing architecture and evidence-grounding principles.
+
+### Suggested workflow
+
+1. Fork the repository.
+2. Clone your fork.
+3. Create a focused branch.
+4. Set up the development environment using this README.
+5. Make a focused change.
+6. Add or update tests.
+7. Run the relevant tests and the unified test command.
+8. Commit with a clear message.
+9. Open a pull request describing the change and verification performed.
+
+Example:
 
 ```bash
-python run_tests.py
+git checkout -b feature/describe-your-change
+git add .
+git commit -m "feat(retrieval): improve evidence ranking"
+git push origin feature/describe-your-change
 ```
 
-### Run Test Suites Individually
+In a pull request, include:
+- The problem being addressed.
+- The implementation approach.
+- Relevant screenshots or API examples, when useful.
+- Tests executed and their results.
+- Any configuration or migration requirements.
 
-**Backend Tests (`pytest`):**
+Do not commit `.env` files, credentials, local databases, generated model files, or unrelated build artifacts.
+
+---
+
+## 15. Development workflow
+
+### Backend development
+
+From the repository root, activate the virtual environment and run:
+
+```bash
+uvicorn app.main:app --app-dir backend --reload --port 8000
+```
+
+### Frontend development
+
+```bash
+npm --prefix frontend run dev
+```
+
+### Run backend tests
+
 ```bash
 pytest backend/tests/test_nexia.py -v
 ```
 
-**Frontend Tests (`vitest`):**
+### Run frontend tests
+
 ```bash
 npm --prefix frontend test
 ```
 
-### Test Coverage Breakdown
-
-| Layer | File | Tests | Coverage Areas |
-| :--- | :--- | :--- | :--- |
-| **Backend** | `backend/tests/test_nexia.py` | **40** | Health checks, metrics, API surface 404 validation, Conversation CRUD, Atomic title generation, Context budgeting, Adaptive NLP, Enforced retrieval config (3, 0.4, 9), Slotted evidence packing, Inline `[k]` marker stripping, Single primary citation footer, SSE streaming filter, TokenBucket rate limiter, ResponseController admission queue, In-memory cache. |
-| **Frontend** | `frontend/src/test/nexia.test.tsx` | **22** | UI component rendering, Sidebar navigation, ConfirmModal, Zustand chat store, SSE stream reader, Unified "Thinking..." indicator, Enforced retrieval config (3, 0.4, 9), Error boundary, Virtualization container, Single Wikipedia hyperlinked citation rendering. |
-| **Total** | | **62** | **100% Pass Rate** |
-
----
-
-## REST API Documentation
-
-### System Endpoints
-
-| Method | Path | Description | Response |
-| :--- | :--- | :--- | :--- |
-| `GET` | `/health` | Service liveness probe | `{"status": "ok"}` |
-| `GET` | `/metrics` | Operational performance metrics | Latency percentiles, cache hit ratios, queue depths |
-
-### Conversation Management
-
-| Method | Path | Description | Request Body |
-| :--- | :--- | :--- | :--- |
-| `GET` | `/api/v1/conversations` | List user conversations (paginated) | None |
-| `POST` | `/api/v1/conversations` | Create a new conversation thread | `{"title": "Optional Title"}` |
-| `GET` | `/api/v1/conversations/{id}` | Get conversation with messages | None |
-| `PATCH` | `/api/v1/conversations/{id}` | Update conversation title | `{"title": "New Title"}` |
-| `DELETE` | `/api/v1/conversations/{id}` | Delete conversation & messages | None |
-
-### Retrieval & Answer Generation
-
-| Method | Path | Description | Parameters / Payload |
-| :--- | :--- | :--- | :--- |
-| `POST` | `/api/v1/retrieval/answer` | Synchronous answer generation | `{"question": "string", "conversation_id": "uuid", "top_k_per_document": 3, "min_confidence": 0.4, "max_evidence_passages": 9}` |
-| `POST` | `/api/v1/retrieval/answer/stream` | Server-Sent Events (SSE) streaming answer | Same payload as above |
-
----
-
-## Configuration Reference
-
-Key configuration settings managed in `backend/.env`:
-
-| Variable | Default Value | Description |
-| :--- | :--- | :--- |
-| `DATABASE_URL` | `postgresql+asyncpg://...` | PostgreSQL connection string with asyncpg driver |
-| `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama API service host |
-| `LLM_MODEL` | `gemma3:4b` | Ollama model identifier for answer generation |
-| `EMBEDDING_MODEL` | `nomic-embed-text` | Ollama model identifier for dense embeddings |
-| `EMBEDDING_DIMENSIONS` | `768` | Dimension vector size for embeddings |
-| `INFERENCE_MAX_ACTIVE` | `1` | Max concurrent active LLM inferences |
-| `INFERENCE_MAX_QUEUE` | `3` | Max requests queued before rejecting |
-| `INFERENCE_QUEUE_TIMEOUT`| `30.0` | Max wait time (seconds) in admission queue |
-| `RATE_LIMIT_ANSWER_CAPACITY` | `2` | Burst capacity for `/answer` endpoints |
-| `RATE_LIMIT_ANSWER_REFILL_SECONDS` | `30.0` | Token refill period for `/answer` |
-
----
-
-## Contributing & Development Workflow
-
-Contributions are welcomed. Please follow this standard engineering workflow:
-
-1. **Fork the Repository**: Create an isolated fork under your GitHub account.
-2. **Create a Feature Branch**:
-   ```bash
-   git checkout -b feature/your-feature-name
-   ```
-3. **Run Code Quality & Tests**:
-   Ensure all 62 tests pass and frontend builds cleanly before committing:
-   ```bash
-   python run_tests.py
-   npm --prefix frontend run build
-   ```
-4. **Adhere to Code Standards**:
-   - Python: Follow PEP 8 and use type annotations throughout.
-   - TypeScript: Maintain strict type safety; avoid `any`.
-   - Documentation: Maintain docstrings and update README when modifying contracts.
-5. **Open a Pull Request**: Submit your PR targeting `main` with a detailed explanation of changes and test evidence.
-
-For planned improvements and backlog discussions, refer to [docs/GITHUB_ISSUES.md](docs/GITHUB_ISSUES.md).
-
----
-
-## License
-
-This project is licensed under the [MIT License](LICENSE).
-
----
-
-<p align="center">
-  <b>Nexia</b> — Designed & Maintained by <a href="https://github.com/Deekshith1983">Deekshith</a> (<a href="mailto:dikideeku@gmail.com">dikideeku@gmail.com</a>)
-</p>
-
-- **Web Application**: Access `http://localhost:5173` in your browser.
-- Vite automatically proxies `/api` and `/health` requests to `http://localhost:8000`.
-
-### 3. Production Frontend Build
-
-To build and verify the static assets:
+### Build the frontend
 
 ```bash
 npm --prefix frontend run build
 ```
 
----
-
-## Automated Testing Suite
-
-Nexia includes a consolidated test suite containing **62 tests** (40 backend, 22 frontend) spanning all functional, performance, and UI layers.
-
-### Run All Tests via Unified Runner
-
-Execute both backend and frontend test suites with formatted summary reporting:
+### Run full project verification
 
 ```bash
 python run_tests.py
 ```
 
-### Run Test Suites Individually
-
-**Backend Tests (`pytest`):**
-```bash
-pytest backend/tests/test_nexia.py -v
-```
-
-**Frontend Tests (`vitest`):**
-```bash
-npm --prefix frontend test
-```
-
-### Test Coverage Breakdown
-
-| Layer | File | Tests | Coverage Areas |
-| :--- | :--- | :--- | :--- |
-| **Backend** | `backend/tests/test_nexia.py` | **40** | Health checks, metrics, API surface 404 validation, Conversation CRUD, Atomic title generation, Context budgeting, Adaptive NLP, Enforced retrieval config (3, 0.4, 9), Slotted evidence packing, Inline `[k]` marker stripping, Single primary citation footer, SSE streaming filter, TokenBucket rate limiter, ResponseController admission queue, In-memory cache. |
-| **Frontend** | `frontend/src/test/nexia.test.tsx` | **22** | UI component rendering, Sidebar navigation, ConfirmModal, Zustand chat store, SSE stream reader, Unified "Thinking..." indicator, Enforced retrieval config (3, 0.4, 9), Error boundary, Virtualization container, Single Wikipedia hyperlinked citation rendering. |
-| **Total** | | **62** | **100% Pass Rate** |
+Use the backend Swagger UI at `http://localhost:8000/docs` to inspect the API contracts while developing frontend integrations.
 
 ---
 
-## REST API Documentation
+## 16. License
 
-### System Endpoints
+Nexia is licensed under the MIT License.
 
-| Method | Path | Description | Response |
-| :--- | :--- | :--- | :--- |
-| `GET` | `/health` | Service liveness probe | `{"status": "ok"}` |
-| `GET` | `/metrics` | Operational performance metrics | Latency percentiles, cache hit ratios, queue depths |
-
-### Conversation Management
-
-| Method | Path | Description | Request Body |
-| :--- | :--- | :--- | :--- |
-| `GET` | `/api/v1/conversations` | List user conversations (paginated) | None |
-| `POST` | `/api/v1/conversations` | Create a new conversation thread | `{"title": "Optional Title"}` |
-| `GET` | `/api/v1/conversations/{id}` | Get conversation with messages | None |
-| `PATCH` | `/api/v1/conversations/{id}` | Update conversation title | `{"title": "New Title"}` |
-| `DELETE` | `/api/v1/conversations/{id}` | Delete conversation & messages | None |
-
-### Retrieval & Answer Generation
-
-| Method | Path | Description | Parameters / Payload |
-| :--- | :--- | :--- | :--- |
-| `POST` | `/api/v1/retrieval/answer` | Synchronous answer generation | `{"question": "string", "conversation_id": "uuid", "top_k_per_document": 3, "min_confidence": 0.4, "max_evidence_passages": 9}` |
-| `POST` | `/api/v1/retrieval/answer/stream` | Server-Sent Events (SSE) streaming answer | Same payload as above |
+You are free to use, copy, modify, publish, distribute, sublicense, and sell copies of this software, subject to the conditions of the MIT License
 
 ---
 
-## Configuration Reference
+## 17. Author and attribution
 
-Key configuration settings managed in `backend/.env`:
+**Nexia was created and developed from scratch by its original author.**
 
-| Variable | Default Value | Description |
-| :--- | :--- | :--- |
-| `DATABASE_URL` | `postgresql+asyncpg://...` | PostgreSQL connection string with asyncpg driver |
-| `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama API service host |
-| `LLM_MODEL` | `gemma3:4b` | Ollama model identifier for answer generation |
-| `EMBEDDING_MODEL` | `nomic-embed-text` | Ollama model identifier for dense embeddings |
-| `EMBEDDING_DIMENSIONS` | `768` | Dimension vector size for embeddings |
-| `INFERENCE_MAX_ACTIVE` | `1` | Max concurrent active LLM inferences |
-| `INFERENCE_MAX_QUEUE` | `3` | Max requests queued before rejecting |
-| `INFERENCE_QUEUE_TIMEOUT`| `30.0` | Max wait time (seconds) in admission queue |
-| `RATE_LIMIT_ANSWER_CAPACITY` | `2` | Burst capacity for `/answer` endpoints |
-| `RATE_LIMIT_ANSWER_REFILL_SECONDS` | `30.0` | Token refill period for `/answer` |
+- **Creator and Lead Developer:** Deekshith
+- **Email:** dikideeku@gmail.com`
+- **GitHub:** [@Deekshith1983](https://github.com/Deekshith1983)
+- **Repository:** [Deekshith1983/Nexia](https://github.com/Deekshith1983/Nexia)
+
+The project’s original architecture, application code, retrieval workflows, evidence preparation, interface, and integrations are attributed to the author, subject to the licenses and attribution requirements of third-party dependencies and tools.
 
 ---
 
-## Contributing & Development Workflow
-
-Contributions are welcomed. Please follow this standard engineering workflow:
-
-1. **Fork the Repository**: Create an isolated fork under your GitHub account.
-2. **Create a Feature Branch**:
-   ```bash
-   git checkout -b feature/your-feature-name
-   ```
-3. **Run Code Quality & Tests**:
-   Ensure all 62 tests pass and frontend builds cleanly before committing:
-   ```bash
-   python run_tests.py
-   npm --prefix frontend run build
-   ```
-4. **Adhere to Code Standards**:
-   - Python: Follow PEP 8 and use type annotations throughout.
-   - TypeScript: Maintain strict type safety; avoid `any`.
-   - Documentation: Maintain docstrings and update README when modifying contracts.
-5. **Open a Pull Request**: Submit your PR targeting `main` with a detailed explanation of changes and test evidence.
-
-For planned improvements and backlog discussions, refer to [docs/GITHUB_ISSUES.md](docs/GITHUB_ISSUES.md).
-
----
-
-## License
-
-This project is licensed under the [MIT License](LICENSE).
-
----
-
-<p align="center">
-  <b>Nexia</b> — Designed & Maintained by <a href="https://github.com/Deekshith1983">Deekshith1983</a> (<a href="mailto:dikideeku@gmail.com">dikideeku@gmail.com</a>)
-</p>
+*Built with a focus on grounded answers, transparent evidence handling, and local AI inference.*
