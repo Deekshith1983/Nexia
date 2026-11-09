@@ -139,6 +139,16 @@ The versions below reflect the versions or minimum versions stated in the suppli
 
 Nexia uses a frontend/backend architecture. The frontend sends user questions to the FastAPI backend. The backend prepares evidence from the configured Wikipedia knowledge source, invokes the local model through Ollama, and returns a response to the frontend.
 
+<p align="center">
+  <a href="docs/nexia-architecture.png" target="_blank">
+    <img src="docs/nexia-architecture.png" alt="Nexia End-to-End System Architecture" width="100%" style="border-radius: 12px; border: 1px solid #1e293b; box-shadow: 0 10px 25px rgba(0,0,0,0.5);" />
+  </a>
+  <br />
+  <a href="docs/nexia-architecture.png" download><b>📥 Download High-Res PNG (1920x1180)</b></a> &nbsp;•&nbsp; 
+  <a href="docs/nexia-architecture.svg" download><b>📥 Download Vector SVG</b></a> &nbsp;•&nbsp; 
+  <a href="docs/architecture-viewer.html" target="_blank"><b>🖥️ Open Interactive Diagram Viewer</b></a>
+</p>
+
 ```mermaid
 flowchart TD
     U[User] --> FE[React + TypeScript frontend]

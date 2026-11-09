@@ -22,9 +22,6 @@ export const SidebarHeader: React.FC<SidebarHeaderProps> = ({ onNewChat, onClose
           </div>
           <div>
             <h1 className="font-semibold text-base tracking-tight text-foreground">Nexia</h1>
-            <p className="text-[10px] text-muted-foreground font-medium uppercase tracking-wider">
-              Wikipedia Grounded
-            </p>
           </div>
         </div>
 
