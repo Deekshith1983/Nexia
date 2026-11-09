@@ -139,47 +139,30 @@ The versions below reflect the versions or minimum versions stated in the suppli
 
 Nexia uses a frontend/backend architecture. The frontend sends user questions to the FastAPI backend. The backend prepares evidence from the configured Wikipedia knowledge source, invokes the local model through Ollama, and returns a response to the frontend.
 
-### Request and response sequence
-
 ```mermaid
-sequenceDiagram
-    actor User
-    participant UI as React frontend
-    participant API as FastAPI
-    participant Store as PostgreSQL / pgvector
-    participant Wiki as Wikipedia
-    participant Ollama as Ollama
-    participant Verify as Validation and formatting
+flowchart TD
+    U[User] --> FE[React + TypeScript frontend]
+    FE --> API[FastAPI backend]
 
-    User->>UI: Submit a question
-    UI->>API: Send answer request
-    API->>API: Validate retrieval configuration
-    API->>Store: Look up available article data
+    API --> Q[Question analysis and planning]
+    Q --> DB[(PostgreSQL + pgvector)]
+    Q --> W[Wikipedia retrieval]
 
-    alt Required article data is missing
-        API->>Wiki: Retrieve article content
-        Wiki-->>API: Article content
-        API->>API: Process and chunk content
-        API->>Ollama: Generate embeddings
-        Ollama-->>API: Embeddings
-        API->>Store: Persist documents, chunks, and embeddings
-    end
+    W --> P[Article processing and chunking]
+    P --> E[Embedding generation through Ollama]
+    E --> DB
 
-    API->>Store: Retrieve lexical and vector candidates
-    Store-->>API: Candidate passages
-    API->>API: Rank and prepare evidence
-    API->>Ollama: Generate answer using evidence
-    Ollama-->>API: Generated answer
-    API->>Verify: Validate and format answer
-    Verify-->>API: Clean answer and final article link
-    API->>Store: Persist conversation turn
-    API-->>UI: Return answer or stream response
-    UI-->>User: Display answer and final citation
+    DB --> R[BM25 and vector retrieval]
+    R --> EP[Evidence ranking and packing]
+    EP --> PR[Grounded prompt construction]
+
+    PR --> LLM[Ollama - Gemma 3 4B]
+    LLM --> V[Answer validation and formatting]
+    V --> C[Final article citation]
+    C --> API
+    API --> FE
+    FE --> U
 ```
-
-The diagrams describe the intended documented flow. Exact internal sequencing can vary with cache hits, streaming behavior, and the implementation of individual services.
-
----
 
 ### Main architectural responsibilities
 
