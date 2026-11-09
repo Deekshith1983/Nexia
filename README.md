@@ -749,8 +749,7 @@ You are free to use, copy, modify, publish, distribute, sublicense, and sell cop
 
 - **Creator and Lead Developer:** Deekshith
 - **Email:** dikideeku@gmail.com`
-- **GitHub:** [@Deekshith1983](https://github.com/Deekshith1983)
-- **Repository:** [Deekshith1983/Nexia](https://github.com/Deekshith1983/Nexia)
+
 
 The project’s original architecture, application code, retrieval workflows, evidence preparation, interface, and integrations are attributed to the author, subject to the licenses and attribution requirements of third-party dependencies and tools.
 
