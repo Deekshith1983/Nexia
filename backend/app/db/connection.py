@@ -27,6 +27,11 @@ def get_engine() -> AsyncEngine:
         current_loop = None
 
     if _engine is None or (_engine_loop is not None and current_loop is not None and _engine_loop is not current_loop):
+        if _engine is not None:
+            try:
+                _engine.sync_engine.dispose()
+            except Exception:
+                pass
         _engine = create_async_engine(
             settings.DATABASE_URL,
             pool_size=settings.DB_POOL_SIZE,

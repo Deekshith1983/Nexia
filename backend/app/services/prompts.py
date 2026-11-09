@@ -27,7 +27,7 @@ Answer the user's question directly, fluently, and completely.
 
 CRITICAL TONE RULES:
 1. NEVER use meta-language. NEVER say "According to the provided document", "Based on the provided passages", "as documented in the provided evidence", "as per evidence", "as per Wikipedia", "as for the given evidence", "as presented in the evidence", "in the provided evidence", "The provided text defines...", "The passage states", or ANY mention of evidence, passages, documents, or Wikipedia. Speak directly as an authoritative expert stating facts.
-2. Ground all facts in the evidence and attach citations like [1], [2] at the end of relevant sentences.
+2. Ground all facts strictly in the provided evidence. NEVER output inline citation markers or internal evidence references of any kind (such as [k], [1], [2], [source], [passage 1], or evidence identifiers), raw URLs, or a separate Sources or References section. Output clean, fluent, natural-language paragraphs without inline citation brackets; the system automatically appends the authoritative article citation at the end.
 3. Do NOT fabricate information not present in the evidence.
 4. LISTING RULE: If the user asks you to list, enumerate, or name items, output the COMPLETE list — do not stop early, do not summarize, do not say "and others". Every item from the evidence must appear. Begin directly with a heading (e.g. "Presidents of India:") or start the numbered list immediately. Do NOT write introductory filler like "Here is a list of... as documented in the provided evidence".
 5. COMPLETENESS RULE: Never end a sentence mid-way. Always complete every sentence you start.
@@ -89,7 +89,7 @@ def build_answer_prompt(ctx: PromptContext) -> str:
             "- Address each requested aspect (e.g. roles, specific goods/commodities, mechanics, evidence sources) with specific named items and facts.\n"
             "- STRICT EVIDENCE BOUNDARY: Do NOT extrapolate, speculate, or introduce unmentioned outside historical/engineering claims (such as unmentioned Egyptian or Roman engineering or architectural orders) not contained in the text.\n"
             "- ABSTENTION: If the evidence passages do not contain information for any specific requested subquestion, state clearly that the available evidence does not document that aspect. Do NOT invent a plausible connection.\n"
-            "- Attach inline citations like [1], [2] at the end of each factual statement.\n"
+            "- Ground all facts in the evidence. Do NOT generate inline citation markers or internal evidence references (such as [k], [1], [2], [source]), raw URLs, or a Sources section.\n"
             "- Complete all sentences cleanly.\n"
         )
 
@@ -140,7 +140,7 @@ SUFFICIENCY RATING (from Nexia deterministic analysis): {ctx.sufficiency_rating}
 {missing_notice}
 INSTRUCTIONS:
 Provide a clear, authoritative, complete answer.
-1. CITATION REQUIREMENT: Every factual claim must be followed immediately by a citation [k] referencing the specific passage that supports it.
+1. CLEAN NATURAL LANGUAGE: NEVER include inline citations, evidence markers, passage numbers, or bracketed reference identifiers (such as [k], [1], [2], [source], [passage 1], or evidence IDs) anywhere in your answer. Write clean, natural-language sentences.
 2. DO NOT use meta-language like "According to the provided document", "Based on the provided text", "as documented in the provided evidence", "as per evidence", "as per Wikipedia", or "The passage states". State the answer directly.
 3. If the question asks for a list: output a numbered list with EVERY item — do not summarize or truncate. Start directly with the list or a clean heading (e.g. "Presidents of India:").
 4. If the question is factual: answer in complete sentences.

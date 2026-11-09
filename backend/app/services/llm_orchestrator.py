@@ -33,6 +33,7 @@ from app.services.streaming_engine import StreamingEngine
 from app.services.title_generator import ConversationTitleGenerator
 from app.services.citation_manager import (
     PrimaryArticleSelector,
+    StreamingCitationFilter,
     format_answer_with_primary_reference,
 )
 
@@ -219,7 +220,7 @@ class LLMOrchestrator:
         yield StreamingEngine.emit_progress(
             request_id=req_id,
             stage="retrieval",
-            message="Evidence passages retrieved and packed",
+            message="Thinking...",
         )
 
         # 2. Retrieve memories
@@ -267,7 +268,7 @@ class LLMOrchestrator:
         yield StreamingEngine.emit_progress(
             request_id=req_id,
             stage="inference",
-            message=f"Starting generation with {settings.LLM_MODEL}...",
+            message="Thinking...",
         )
 
         current_task = asyncio.current_task()
@@ -284,6 +285,7 @@ class LLMOrchestrator:
         # 4. Stream tokens progressively
         raw_tokens: List[str] = []
         final_gen_result = None
+        citation_filter = StreamingCitationFilter()
 
         try:
             stream_gen = self.llm_adapter.generate_answer_stream(
@@ -298,9 +300,16 @@ class LLMOrchestrator:
                 if event_type == "token":
                     trace.mark_first_token()
                     raw_tokens.append(chunk)
-                    yield StreamingEngine.emit_token(req_id, chunk)
+                    clean_chunk = citation_filter.process_chunk(chunk)
+                    if clean_chunk:
+                        yield StreamingEngine.emit_token(req_id, clean_chunk)
                 elif event_type == "done":
                     final_gen_result = chunk
+
+            # Flush any remaining tokens buffered during streaming
+            flushed = citation_filter.flush()
+            if flushed:
+                yield StreamingEngine.emit_token(req_id, flushed)
 
         except RequestCancelledError:
             yield StreamingEngine.emit_cancelled(req_id, "Request cancelled")
@@ -326,6 +335,11 @@ class LLMOrchestrator:
             answer_text=full_raw_text,
             primary_article=primary_art,
         )
+
+        # Deliver the final single article citation after content completes and is validated
+        if primary_art and primary_art.title and primary_art.url:
+            citation_token = f"\n\n[{primary_art.title.strip()}]({primary_art.url.strip()})"
+            yield StreamingEngine.emit_token(req_id, citation_token)
 
         saved_msg_id = None
         if conversation_id:

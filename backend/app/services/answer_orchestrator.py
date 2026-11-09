@@ -36,6 +36,7 @@ from app.services.prompts import PromptContext
 from app.services.citation_manager import (
     PrimaryArticleSelector,
     format_answer_with_primary_reference,
+    strip_inline_citations,
 )
 from app.services.response_controller import (
     InferenceQueueFullError,
@@ -97,7 +98,7 @@ class ClaimVerifier:
         for p in paragraphs:
             # Check if this paragraph is a list header or list items
             if p.strip().endswith(":") or p.strip().startswith(("-", "*", "1.", "2.", "3.", "4.")):
-                verified_paragraphs.append(p)
+                verified_paragraphs.append(strip_inline_citations(p))
                 continue
 
             sentences = re.split(r"(?<=[.!?])\s+", p.strip())
@@ -144,37 +145,35 @@ class ClaimVerifier:
                     if has_support:
                         stats["claims_supported"] += 1
                     else:
-                        # Cited passage doesn't match; search other retrieved passages for actual support
-                        found_remap = False
+                        # Search other retrieved passages for actual support
                         for j, ch in enumerate(selected_chunks, 1):
                             if s_content_words and sum(1 for w in s_content_words if w in ch.passage_text.lower()) >= 2:
-                                s_clean = re.sub(r"\[\d+\]", f"[{j}]", s_clean)
-                                found_remap = True
+                                has_support = True
                                 stats["claims_supported"] += 1
-                                stats["citations_remapped"] += 1
                                 break
-                        if not found_remap:
-                            # Strip false citation
-                            s_clean = re.sub(r"\[\d+\]", "", s_clean).strip()
-                            s_clean = re.sub(r"\s+([,\.])", r"\1", s_clean)
-                            stats["citations_stripped"] += 1
-                            if foreign_entities:
-                                stats["unsupported_claims_removed"] += 1
-                                continue
+                    # Strip any inline citations
+                    s_clean = strip_inline_citations(s_clean)
+                    stats["citations_stripped"] += len(cites)
+                    if foreign_entities and not has_support:
+                        stats["unsupported_claims_removed"] += 1
+                        continue
                 else:
-                    # Require evidence per claim: if statement is a factual claim without citation, search for supporting passage
+                    # Require evidence per claim: search for supporting passage
+                    has_support = False
                     if len(s_content_words) >= 3 or proper_nouns:
                         for j, ch in enumerate(selected_chunks, 1):
                             if sum(1 for w in s_content_words if w in ch.passage_text.lower()) >= 2:
-                                s_clean = f"{s_clean.rstrip('.')} [{j}]."
-                                stats["citations_attached"] += 1
+                                has_support = True
                                 stats["claims_supported"] += 1
                                 break
 
-                    # If sentence introduces foreign entities not found anywhere in evidence and has no citation support, drop it
-                    if len(foreign_entities) >= 1 and not re.search(r"\[\d+\]", s_clean):
+                    # If sentence introduces foreign entities not found anywhere in evidence and has no support, drop it
+                    if len(foreign_entities) >= 1 and not has_support:
                         stats["unsupported_claims_removed"] += 1
                         continue
+
+                    # Strip any inline citations such as [k] or [source]
+                    s_clean = strip_inline_citations(s_clean)
 
                 valid_sentences.append(s_clean)
 
@@ -719,16 +718,8 @@ class AnswerOrchestrator:
                     elif len(lines) > 1 and not last_line.endswith((".", "!", "?")):
                         answer_text = "\n".join(lines[:-1]).strip()
 
-            # 5. Citation verification: ensure citations point only to valid retrieved passage indexes
-            max_ref_idx = len(selected_chunks)
-            if max_ref_idx > 0:
-                def _clamp_or_remove_cite(match: re.Match) -> str:
-                    idx_val = int(match.group(1))
-                    if 1 <= idx_val <= max_ref_idx:
-                        return f"[{idx_val}]"
-                    return ""
-                answer_text = re.sub(r"\[(\d+)\]", _clamp_or_remove_cite, answer_text)
-                answer_text = re.sub(r"\s+([,\.])", r"\1", answer_text)
+            # 5. Citation verification: eliminate all inline citation markers
+            answer_text = strip_inline_citations(answer_text)
 
             # 6. Repetition verification: deduplicate near-identical consecutive sentences (Jaccard >= 0.80)
             def _clean_repetitive_sentences(text: str) -> str:
@@ -895,7 +886,7 @@ class AnswerOrchestrator:
         yield StreamingEngine.emit_progress(
             request_id=req_id,
             stage="retrieval",
-            message="Gathering evidence passages from knowledge base...",
+            message="Thinking...",
         )
 
         # Detect listing query
@@ -1017,7 +1008,7 @@ class AnswerOrchestrator:
         yield StreamingEngine.emit_progress(
             request_id=req_id,
             stage="inference",
-            message=f"Generating grounded answer using local {settings.LLM_MODEL}...",
+            message="Thinking...",
         )
 
         # Delegate streaming execution to LLMOrchestrator

@@ -47,7 +47,7 @@ def test_case_a_single_article():
     formatted = format_answer_with_primary_reference(raw_answer, primary)
     assert "[1]" not in formatted
     assert formatted.endswith("[Samudragupta](https://en.wikipedia.org/wiki/Samudragupta)")
-    assert formatted == "Samudragupta expanded his empire through extensive military conquests. [Samudragupta](https://en.wikipedia.org/wiki/Samudragupta)"
+    assert formatted == "Samudragupta expanded his empire through extensive military conquests.\n\n[Samudragupta](https://en.wikipedia.org/wiki/Samudragupta)"
 
 
 # =====================================================================
@@ -275,31 +275,122 @@ def test_case_f_long_answer_multiple_paragraphs():
     formatted = format_answer_with_primary_reference(multi_para_answer, primary)
 
     paragraphs = formatted.split("\n\n")
-    assert len(paragraphs) == 3
+    assert len(paragraphs) == 4
     # Check paragraph 1 does NOT have the link
     assert "https://" not in paragraphs[0]
     assert "[1]" not in paragraphs[0]
     # Check paragraph 2 does NOT have the link
     assert "https://" not in paragraphs[1]
     assert "[1]" not in paragraphs[1]
-    # Check paragraph 3 ends with the link
-    assert paragraphs[2].endswith("[Aryabhata](https://en.wikipedia.org/wiki/Aryabhata)")
+    # Check paragraph 3 does NOT have the link
+    assert "https://" not in paragraphs[2]
     assert "[2]" not in paragraphs[2]
+    # Check paragraph 4 is the final article link
+    assert paragraphs[3] == "[Aryabhata](https://en.wikipedia.org/wiki/Aryabhata)"
 
 
 # =====================================================================
 # Case G: Inline Citation Stripping Utility
 # =====================================================================
 def test_strip_inline_citations():
-    """Verify inline citation removal preserves real numbers, dates, and non-digit brackets."""
+    """Verify inline citation removal removes [k], [1], [source], etc. while preserving math intervals, editorial quotes, and markdown links."""
     text1 = "In 1529 [1], Krishnadevaraya died [2]. He ruled for 20 years [1]."
     assert strip_inline_citations(text1) == "In 1529, Krishnadevaraya died. He ruled for 20 years."
 
+    # Mathematical intervals must be preserved
     text2 = "Values range between [10, 20] in standard notation."
     assert strip_inline_citations(text2) == "Values range between [10, 20] in standard notation."
 
-    text3 = "This statement requires verification [citation needed]."
-    assert strip_inline_citations(text3) == "This statement requires verification [citation needed]."
+    # Editorial notes in quotes must be preserved
+    text_editorial1 = "He wrote [sic] in his notebook."
+    assert strip_inline_citations(text_editorial1) == "He wrote [sic] in his notebook."
+
+    text_editorial2 = "The biographer noted that [she] was exceptionally gifted."
+    assert strip_inline_citations(text_editorial2) == "The biographer noted that [she] was exceptionally gifted."
+
+    # Markdown links must be preserved
+    text_link = "More details at [Albert Einstein](https://en.wikipedia.org/wiki/Albert_Einstein)."
+    assert strip_inline_citations(text_link) == "More details at [Albert Einstein](https://en.wikipedia.org/wiki/Albert_Einstein)."
+
+
+def test_strip_inline_citations_k_and_internal_markers():
+    """Verify [k], [1], [2], [source], [passage 1] and chained markers are cleanly removed."""
+    # The exact user-provided problem statement
+    user_example = (
+        "Albert Einstein was a German-born theoretical physicist who developed the theory of relativity [k]. "
+        "He received the 1921 Nobel Prize in Physics for his explanation of the photoelectric effect [k]. "
+        "Einstein's work profoundly impacted the fields of physics and astronomy [k]."
+    )
+    expected_clean = (
+        "Albert Einstein was a German-born theoretical physicist who developed the theory of relativity. "
+        "He received the 1921 Nobel Prize in Physics for his explanation of the photoelectric effect. "
+        "Einstein's work profoundly impacted the fields of physics and astronomy."
+    )
+    assert strip_inline_citations(user_example) == expected_clean
+
+    # Internal markers: [source], [passage 1], [doc 2], [evidence 1], [1, 2], [1], [2]
+    assert strip_inline_citations("Relativity was confirmed [source].") == "Relativity was confirmed."
+    assert strip_inline_citations("Relativity was confirmed [passage 1].") == "Relativity was confirmed."
+    assert strip_inline_citations("Relativity was confirmed [doc 2].") == "Relativity was confirmed."
+    assert strip_inline_citations("Relativity was confirmed [evidence 1].") == "Relativity was confirmed."
+    assert strip_inline_citations("Relativity was confirmed [1], [2].") == "Relativity was confirmed."
+    assert strip_inline_citations("Relativity was confirmed [1, 2].") == "Relativity was confirmed."
+    assert strip_inline_citations("Relativity was confirmed [k][1].") == "Relativity was confirmed."
+    assert strip_inline_citations("Relativity was confirmed. [k]") == "Relativity was confirmed."
+    assert strip_inline_citations("Relativity was confirmed.[k]") == "Relativity was confirmed."
+
+    # List items with [k]
+    list_text = "1. General relativity [k]\n2. Special relativity [k]"
+    assert strip_inline_citations(list_text) == "1. General relativity\n2. Special relativity"
+
+
+def test_format_answer_with_primary_reference_user_example():
+    """Verify single final Wikipedia article citation appended to clean text with no [k]."""
+    user_example = (
+        "Albert Einstein was a German-born theoretical physicist who developed the theory of relativity [k]. "
+        "He received the 1921 Nobel Prize in Physics for his explanation of the photoelectric effect [k]. "
+        "Einstein's work profoundly impacted the fields of physics and astronomy [k]."
+    )
+    primary = PrimaryArticle(
+        title="Albert Einstein",
+        url="https://en.wikipedia.org/wiki/Albert_Einstein",
+    )
+    formatted = format_answer_with_primary_reference(user_example, primary)
+    expected = (
+        "Albert Einstein was a German-born theoretical physicist who developed the theory of relativity. "
+        "He received the 1921 Nobel Prize in Physics for his explanation of the photoelectric effect. "
+        "Einstein's work profoundly impacted the fields of physics and astronomy.\n\n"
+        "[Albert Einstein](https://en.wikipedia.org/wiki/Albert_Einstein)"
+    )
+    assert formatted == expected
+
+
+def test_streaming_citation_filter():
+    """Verify StreamingCitationFilter suppresses [k], [1], [source] across chunk boundaries."""
+    from app.services.citation_manager import StreamingCitationFilter
+
+    # Simulation where [k]. is split into 3 chunks: [' [', 'k', '].']
+    chunks = [
+        "Albert", " Einstein", " developed", " relativity", " [", "k", "].",
+        " He", " received", " the", " Nobel", " Prize", " [", "1", "],", " [", "2", "].",
+        " Values", " in", " [10,", " 20].",
+    ]
+    cf = StreamingCitationFilter()
+    streamed = []
+    for c in chunks:
+        out = cf.process_chunk(c)
+        if out:
+            streamed.append(out)
+    flushed = cf.flush()
+    if flushed:
+        streamed.append(flushed)
+
+    full_text = "".join(streamed)
+    assert "[k]" not in full_text
+    assert "[1]" not in full_text
+    assert "[2]" not in full_text
+    assert "[10, 20]" in full_text
+    assert full_text == "Albert Einstein developed relativity. He received the Nobel Prize. Values in [10, 20]."
 
 
 # =====================================================================
@@ -375,4 +466,135 @@ async def test_case_i_streaming_parity():
         assert "[1]" not in complete_event["answer_text"]
         assert complete_event["answer_text"].endswith("[Krishnadevaraya](https://en.wikipedia.org/wiki/Krishnadevaraya)")
         assert len(complete_event["source_references"]) == 1
+
+
+# =====================================================================
+# Case J: Model-Generated Sources/References Section Stripping
+# =====================================================================
+def test_case_j_sources_section_stripped():
+    """Verify that model-generated Sources or References headings and lists are stripped."""
+    raw = (
+        "The Gupta Empire was an ancient Indian empire [1]. It existed from the mid-to-late 3rd century to 543 CE [2].\n\n"
+        "Sources:\n"
+        "- https://en.wikipedia.org/wiki/Gupta_Empire\n"
+        "- [Gupta Empire](https://en.wikipedia.org/wiki/Gupta_Empire)"
+    )
+    primary = PrimaryArticle(
+        title="Gupta Empire",
+        url="https://en.wikipedia.org/wiki/Gupta_Empire",
+    )
+    formatted = format_answer_with_primary_reference(raw, primary)
+
+    assert "Sources:" not in formatted
+    assert "[1]" not in formatted
+    assert "[2]" not in formatted
+    assert formatted.count("https://en.wikipedia.org/wiki/Gupta_Empire") == 1
+    assert formatted.endswith("[Gupta Empire](https://en.wikipedia.org/wiki/Gupta_Empire)")
+
+
+# =====================================================================
+# Case K: Duplicate Final Hyperlink Deduplicated
+# =====================================================================
+def test_case_k_duplicate_final_hyperlink_deduplicated():
+    """Verify that if the model output already ends with a markdown link, no duplicate is created."""
+    raw = "The Mauryan Empire was founded by Chandragupta Maurya in 322 BCE.\n\n[Mauryan Empire](https://en.wikipedia.org/wiki/Mauryan_Empire)"
+    primary = PrimaryArticle(
+        title="Mauryan Empire",
+        url="https://en.wikipedia.org/wiki/Mauryan_Empire",
+    )
+    formatted = format_answer_with_primary_reference(raw, primary)
+
+    assert formatted.count("[Mauryan Empire](https://en.wikipedia.org/wiki/Mauryan_Empire)") == 1
+    assert formatted.endswith("[Mauryan Empire](https://en.wikipedia.org/wiki/Mauryan_Empire)")
+
+
+# =====================================================================
+# Case L: Streaming Thinking Progress Events
+# =====================================================================
+@pytest.mark.asyncio
+async def test_case_l_streaming_thinking_progress():
+    """Verify that streaming pipeline emits 'Thinking...' in progress events without technical jargon."""
+    import json
+    orchestrator = AnswerOrchestrator()
+
+    async def mock_stream_gen(*args, **kwargs):
+        yield "token", "Answer "
+        yield "token", "text."
+        yield "done", None
+
+    with patch.object(orchestrator.llm_orchestrator.llm_adapter, "generate_answer_stream", side_effect=mock_stream_gen):
+        progress_events = []
+        async for chunk in orchestrator.llm_orchestrator.execute_turn_stream(
+            question="What is physics?",
+            evidence_passages=[],
+        ):
+            for line in chunk.strip().split("\n"):
+                if line.startswith("data:"):
+                    data = json.loads(line.split(":", 1)[1].strip())
+                    if "message" in data:
+                        progress_events.append(data)
+
+        assert len(progress_events) >= 2
+        for p in progress_events:
+            assert p["message"] == "Thinking..."
+            assert "gemma" not in p["message"].lower()
+            assert "knowledge base" not in p["message"].lower()
+
+
+# =====================================================================
+# Case M: Streaming with Split [k] Tokens Does Not Leak to User
+# =====================================================================
+@pytest.mark.asyncio
+async def test_case_m_streaming_with_k_tokens():
+    """Verify streaming suppresses [k] across token chunk boundaries and appends single final article."""
+    import json
+    orchestrator = AnswerOrchestrator()
+    question = "Who was Albert Einstein?"
+    evidence = [
+        {
+            "document_title": "Albert Einstein",
+            "section_title": "Early life and career",
+            "source_url": "https://en.wikipedia.org/wiki/Albert_Einstein",
+            "passage_text": "Albert Einstein was a German-born theoretical physicist who developed relativity.",
+            "rrf_score": 0.55,
+        }
+    ]
+
+    # Split [k]. across 3 chunks: " [", "k", "]."
+    async def mock_stream_gen(*args, **kwargs):
+        tokens = [
+            "Albert ", "Einstein ", "was ", "a ", "physicist", " [", "k", "].",
+            " He ", "developed ", "relativity", " [", "k", "].",
+        ]
+        for t in tokens:
+            yield "token", t
+        yield "done", None
+
+    with patch.object(orchestrator.llm_orchestrator.llm_adapter, "generate_answer_stream", side_effect=mock_stream_gen):
+        delivered_tokens = []
+        complete_events = []
+        async for chunk in orchestrator.llm_orchestrator.execute_turn_stream(
+            question=question,
+            evidence_passages=evidence,
+        ):
+            for line in chunk.strip().split("\n"):
+                if line.startswith("data:"):
+                    data = json.loads(line.split(":", 1)[1].strip())
+                    if "token" in data:
+                        delivered_tokens.append(data["token"])
+                    if "answer_text" in data:
+                        complete_events.append(data)
+
+        # 1. No delivered token during the live stream ever contained [k]
+        combined_stream = "".join(delivered_tokens)
+        assert "[k]" not in combined_stream
+        assert "Albert Einstein was a physicist. He developed relativity." in combined_stream
+
+        # 2. Complete event has clean text without [k] and exactly one Wikipedia link at the end
+        assert len(complete_events) == 1
+        final_answer = complete_events[0]["answer_text"]
+        assert "[k]" not in final_answer
+        assert final_answer.endswith("[Albert Einstein](https://en.wikipedia.org/wiki/Albert_Einstein)")
+        assert final_answer.count("https://en.wikipedia.org/wiki/Albert_Einstein") == 1
+
 

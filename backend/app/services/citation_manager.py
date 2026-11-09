@@ -3,8 +3,11 @@
 Evaluates evidence passages and verified factual claims to select a single,
 authoritative primary Wikipedia article reference, and formats the user-facing
 answer with a clean trailing markdown hyperlink:
-"[Article Title](canonical_article_url)"
-without inline numbered citations, raw URLs, or separate bibliographies.
+
+[Gupta Empire](https://en.wikipedia.org/wiki/Gupta_Empire)
+
+with no inline numbered citations, raw URLs, middle-of-paragraph citations,
+or separate bibliographies/Sources sections.
 """
 
 from dataclasses import dataclass
@@ -54,7 +57,9 @@ class PrimaryArticleSelector:
     ) -> Optional[PrimaryArticle]:
         """Select a single primary Wikipedia article with the strongest verified evidence coverage.
 
-        Returns None if no single article provides adequate coverage (safe fallback).
+        - If a single article contributed: selected.
+        - If multiple articles contributed: selects the strongest overall supporting article.
+        - If no valid Wikipedia article is available: returns None (safe fallback).
         """
         if not selected_chunks or not answer_text.strip():
             return None
@@ -89,8 +94,16 @@ class PrimaryArticleSelector:
                 rrf_score = getattr(chunk, "rrf_score", 0.0)
                 text = getattr(chunk, "passage_text", "") or getattr(chunk, "text", "")
 
-            if not source_url and doc_title != "Unknown Source":
+            # Ignore ungrounded/unknown sources
+            if not doc_title or doc_title == "Unknown Source":
+                continue
+
+            if not source_url and doc_title:
                 source_url = f"https://en.wikipedia.org/wiki/{doc_title.replace(' ', '_')}"
+
+            # Validate URL protocol
+            if not source_url.startswith(("http://", "https://")):
+                continue
 
             canonical_id = cls._canonical_article_id(doc_title, source_url)
             if canonical_id not in article_chunks:
@@ -136,8 +149,8 @@ class PrimaryArticleSelector:
                         for c_info in c_list:
                             c_text = c_info["text"].lower()
                             matches = sum(1 for w in s_words if w in c_text)
-                            # Require at least 3 significant words and at least 30% of sentence vocabulary
-                            if matches >= 3 and (matches / len(s_words)) >= 0.30 and matches > max_matches:
+                            # Require at least 2 significant words and at least 20% of sentence vocabulary
+                            if matches >= 2 and (matches / len(s_words)) >= 0.20 and matches > max_matches:
                                 max_matches = matches
                                 best_art = art_id
                     if best_art:
@@ -185,9 +198,9 @@ class PrimaryArticleSelector:
                 for w in re.findall(r"\b[a-zA-Z]{3,}\b", title)
                 if w.lower() not in cls.GENERIC_STOPWORDS
             }
-            entity_bonus = 0.15 if (t_words & q_words) else 0.0
+            entity_bonus = 0.20 if (t_words & q_words) else 0.0
 
-            # Composite coverage score: claim support dominates (50%), relevance (30%), subqueries (20%)
+            # Composite coverage score: claim support dominates (50%), relevance (30%), subqueries (20%) + bonus
             composite_score = (0.50 * claim_prop) + (0.30 * norm_rrf) + (0.20 * sq_ratio) + entity_bonus
 
             candidate_scores.append(
@@ -201,7 +214,7 @@ class PrimaryArticleSelector:
                 )
             )
 
-        # Sort candidates deterministically:
+        # Sort candidates deterministically: highest composite score, then supported claims, then retrieval score
         candidate_scores.sort(
             key=lambda a: (a.coverage_score, a.supported_claims, a.retrieval_score, a.title),
             reverse=True,
@@ -209,47 +222,16 @@ class PrimaryArticleSelector:
 
         best = candidate_scores[0]
 
-        # Selection verification rules:
-        # Rule 1: Must support at least 1 verified claim
-        if best.supported_claims == 0:
-            logger.info("Primary article selection fallback: No article supported verified claims.")
+        # Validation: Ensure the article is genuinely related to the query/passages
+        # If it has 0 supported claims and 0 retrieval score, fallback safely
+        if best.supported_claims == 0 and best.retrieval_score < 0.10:
+            logger.info("Primary article selection fallback: Candidate '%s' has 0 support and low retrieval score.", best.title)
             return None
 
-        # Rule 2: Claim proportion must be adequate (at least 35% of answer claims supported by this article)
-        claim_ratio = best.supported_claims / total_claims if total_claims > 0 else 0.0
-        if claim_ratio < 0.35:
-            logger.info("Primary article selection fallback: Claim ratio %.2f < 0.35", claim_ratio)
+        # If coverage score is below threshold on weak/unrelated topics, fallback
+        if best.coverage_score < coverage_threshold and best.supported_claims == 0:
+            logger.info("Primary article selection fallback: Score %.2f < threshold %.2f and 0 claims.", best.coverage_score, coverage_threshold)
             return None
-
-        # Rule 3: Relevance must not be negligible
-        if best.retrieval_score < 0.10:
-            logger.info("Primary article selection fallback: Retrieval score %.2f < 0.10", best.retrieval_score)
-            return None
-
-        # Rule 4: Must meet the overall coverage threshold
-        if best.coverage_score < coverage_threshold:
-            logger.info(
-                "Primary article selection fallback: Best candidate '%s' score %.2f < threshold %.2f",
-                best.title,
-                best.coverage_score,
-                coverage_threshold,
-            )
-            return None
-
-        # Rule 5: If multiple articles exist and top two are tied with disjoint partial coverage
-        if len(candidate_scores) > 1:
-            second = candidate_scores[1]
-            if (
-                best.supported_claims == second.supported_claims
-                and claim_ratio < 0.40
-                and abs(best.coverage_score - second.coverage_score) < 0.05
-            ):
-                logger.info(
-                    "Primary article selection fallback: Ambiguous tie between '%s' and '%s' with low individual coverage.",
-                    best.title,
-                    second.title,
-                )
-                return None
 
         return best
 
@@ -267,48 +249,177 @@ class PrimaryArticleSelector:
 
 
 def strip_inline_citations(text: str) -> str:
-    """Remove user-facing numbered citations like [1], [2] while preserving valid numbers, dates, and brackets.
-
-    Examples:
-        - "Founded in 1529 [1]." -> "Founded in 1529."
-        - "Rulers [1], [2] conquered..." -> "Rulers conquered..."
-        - "Equation x[0] + 5" -> "Equation x[0] + 5" (preserved)
-        - "[citation needed]" -> "[citation needed]" (preserved)
+    """Remove internal citation markers e.g. [k], [1], [2], [1, 2], [source], [passage 1]
+    and model-generated Sources/References sections while preserving legitimate square brackets
+    (math intervals, editorial quotes) and Markdown hyperlinks.
     """
     if not text:
         return ""
 
-    # Strip bracketed pure integer numbers e.g. [1], [2], [ 12 ]
-    cleaned = re.sub(r"\s*\[\s*\d+\s*\]", "", text)
+    cleaned = text
 
-    # Normalize any double spaces left behind
+    # 1. Strip model-generated trailing Sources / References / External links sections
+    cleaned = re.sub(
+        r"\n+(?:#+\s*)?(?:Sources|References|Citations|External [Ll]inks)\s*:?[\s\S]*$",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    ).strip()
+
+    # Citation keyword pattern:
+    kw = (
+        r"(?:k|source|sources|ref|refs|reference|references|citation|citations|"
+        r"passage|passages|doc|docs|document|documents|evidence|p\d+)"
+        r"(?:\s*[:#]?\s*(?:\d+|[a-zA-Z0-9_-]+))*"
+    )
+    marker = rf"\[\s*(?:{kw}|\d+)\s*\](?!\()"
+
+    # Chained or separated citation markers: e.g. [1], [2] or [k][1] or [1] and [2] or [k], [source]
+    chained = rf"\s*{marker}(?:\s*(?:,|and|&)\s*{marker})*"
+    cleaned = re.sub(chained, "", cleaned, flags=re.IGNORECASE)
+
+    # Remaining standalone keywords e.g. [source 1]
+    cleaned = re.sub(rf"\s*\[\s*{kw}\s*\](?!\()", "", cleaned, flags=re.IGNORECASE)
+
+    # Remaining single integer citations e.g. [1]
+    cleaned = re.sub(r"\s*\[\s*\d+\s*\](?!\()", "", cleaned)
+
+    # Strip number ranges/lists [1, 2] or [1-3] unless preceded by math keywords
+    def replace_multi_num(match):
+        start = match.start()
+        prefix = cleaned[max(0, start - 30):start].lower()
+        if any(w in prefix for w in ["range", "interval", "between", "domain", "values in", "subset", "bounds", "matrix"]):
+            return match.group(0)
+        return ""
+
+    cleaned = re.sub(r"\s*\[\s*\d+\s*(?:[,–-]\s*\d+\s*)+\s*\](?!\()", replace_multi_num, cleaned)
+
+    # Clean punctuation anomalies:
+    # 1. Trailing comma before punctuation: ',.' -> '.' or ',?' -> '?'
+    cleaned = re.sub(r",\s*([\.!?;:])", r"\1", cleaned)
+    # 2. Space before punctuation: ' .' -> '.'
+    cleaned = re.sub(r"\s+([,\.!?;:])", r"\1", cleaned)
+    # 3. Duplicate punctuation: '..' -> '.'
+    cleaned = re.sub(r"([\.!?;:])\s*\1+", r"\1", cleaned)
+    # 4. Strip raw URLs appearing alone on their own lines at the end
+    cleaned = re.sub(r"\n+https?://\S+\s*$", "", cleaned)
+    # 5. Normalize whitespace
     cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
 
-    # Ensure punctuation hugs preceding words cleanly e.g. "word ." -> "word."
-    cleaned = re.sub(r"\s+([,\.!?;:])", r"\1", cleaned)
-
     return cleaned.strip()
+
+
+class StreamingCitationFilter:
+    """Incrementally filters internal citation markers like [k], [1], [source] during SSE token streaming
+    without leaking partial tokens to the client, while preserving legitimate bracketed text and punctuation.
+    """
+
+    KW = (
+        r"(?:k|source|sources|ref|refs|reference|references|citation|citations|"
+        r"passage|passages|doc|docs|document|documents|evidence|p\d+)"
+        r"(?:\s*[:#]?\s*(?:\d+|[a-zA-Z0-9_-]+))*"
+    )
+    MARKER_PATTERN = re.compile(rf"^\[\s*(?:{KW}|\d+)\s*\]$", re.IGNORECASE)
+
+    def __init__(self):
+        self.buffer = ""
+
+    def process_chunk(self, chunk: str) -> str:
+        self.buffer += chunk
+        output = ""
+
+        while True:
+            bracket_idx = self.buffer.find("[")
+            if bracket_idx == -1:
+                # No bracket in buffer. Hold trailing whitespace/comma if at end of buffer
+                # in case the subsequent chunk completes a citation marker
+                stripped = self.buffer.rstrip(" \t,")
+                if stripped:
+                    output += stripped
+                    self.buffer = self.buffer[len(stripped):]
+                break
+
+            pre_text = self.buffer[:bracket_idx]
+            clean_pre = pre_text.rstrip(" \t,")
+            pending_space = pre_text[len(clean_pre):]
+
+            if clean_pre:
+                output += clean_pre
+                self.buffer = pending_space + self.buffer[bracket_idx:]
+                bracket_idx = len(pending_space)
+
+            close_idx = self.buffer.find("]", bracket_idx)
+            if close_idx == -1:
+                # Buffer has open '[' without ']'. If it exceeds threshold or has newline, flush it.
+                if len(self.buffer) > 40 or "\n" in self.buffer:
+                    output += self.buffer
+                    self.buffer = ""
+                break
+
+            bracket_span = self.buffer[bracket_idx:close_idx + 1]
+            after_bracket = self.buffer[close_idx + 1:]
+
+            # Don't strip if this bracket is the anchor text of a markdown link [Title](url)
+            if after_bracket.startswith("("):
+                output += pending_space + bracket_span
+                self.buffer = after_bracket
+                continue
+
+            if self.MARKER_PATTERN.match(bracket_span):
+                # Detected internal citation marker: suppress it.
+                # If chained to another marker via comma/and e.g. ', [2]'
+                after_clean = re.sub(
+                    rf"^(?:[ \t]*(?:,|and|&)[ \t]*)*(?=\[\s*(?:{self.KW}|\d+)\s*\])",
+                    "",
+                    after_bracket,
+                    flags=re.IGNORECASE,
+                )
+                if after_clean != after_bracket:
+                    self.buffer = after_clean
+                elif after_bracket and after_bracket[0] in ".,!?;:":
+                    self.buffer = after_bracket
+                else:
+                    self.buffer = (" " if pending_space.strip() == "" and pending_space else "") + after_bracket
+            else:
+                # Legitimate brackets (e.g. [10, 20] or [sic])
+                output += pending_space + bracket_span
+                self.buffer = after_bracket
+
+        return output
+
+    def flush(self) -> str:
+        res = self.buffer
+        self.buffer = ""
+        return strip_inline_citations(res)
 
 
 def format_answer_with_primary_reference(
     answer_text: str,
     primary_article: Optional[PrimaryArticle],
 ) -> str:
-    """Format final answer presentation with a single trailing primary article hyperlink.
+    """Format final answer presentation with exactly one trailing primary article hyperlink.
 
-    Format:
-        Answer paragraph... [Article Title](canonical_article_url)
+    Required output format:
+        [Answer content paragraphs]
+
+        [Article Title](https://en.wikipedia.org/wiki/Article_Title)
+
+    Ensures no inline citations, no repeated links, and no duplicate final citations.
     """
     cleaned_answer = strip_inline_citations(answer_text)
 
     if not primary_article or not primary_article.title or not primary_article.url:
         return cleaned_answer
 
-    # Ensure clean trailing hyperlink on final paragraph
-    hyperlink = f"[{primary_article.title.strip()}]({primary_article.url.strip()})"
+    title = primary_article.title.strip()
+    url = primary_article.url.strip()
+    hyperlink = f"[{title}]({url})"
 
-    # If the answer already contains this exact link at the end, avoid duplication
+    # Strip any trailing markdown link or repeated final reference if already present
+    cleaned_answer = re.sub(r"\n*\[[^\]]+\]\(https?://[^\)]+\)\s*$", "", cleaned_answer).strip()
+
+    # If the answer already contains this exact link at the end, clean it so we append consistently
     if cleaned_answer.endswith(hyperlink):
-        return cleaned_answer
+        cleaned_answer = cleaned_answer[:-len(hyperlink)].rstrip()
 
-    return f"{cleaned_answer} {hyperlink}".strip()
+    return f"{cleaned_answer}\n\n{hyperlink}".strip()
