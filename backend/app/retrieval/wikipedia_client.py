@@ -5,7 +5,10 @@ from typing import List, Dict, Any, Optional, Tuple
 from html.parser import HTMLParser
 import httpx
 
+from app.core.config import settings
+from app.core.http_client import get_http_client
 from app.schemas.retrieval import SearchCandidate
+from app.services.cache_service import CacheService
 
 
 class WikipediaClientError(Exception):
@@ -123,15 +126,26 @@ class WikipediaClient:
     BASE_URL = "https://en.wikipedia.org/w/api.php"
     USER_AGENT = "NexiaBot/0.1.0 (https://github.com/nexia-retrieval; contact@nexia.local)"
 
-    def __init__(self, timeout: float = 10.0):
+    def __init__(self, timeout: float = 10.0, client: Optional[httpx.AsyncClient] = None):
         self.timeout = timeout
         self.headers = {
             "User-Agent": self.USER_AGENT,
             "Accept": "application/json",
         }
+        self._client = client
+        self.cache = CacheService.get_instance()
+
+    @property
+    def client(self) -> httpx.AsyncClient:
+        return self._client or get_http_client()
 
     async def search(self, query: str, limit: int = 10) -> List[SearchCandidate]:
-        """Search Wikipedia for candidate articles matching the query."""
+        """Search Wikipedia for candidate articles matching the query with metadata caching."""
+        cache_key = CacheService.build_key("wiki_search", query, limit)
+        cached = await self.cache.get(cache_key)
+        if cached is not None and isinstance(cached, list):
+            return [SearchCandidate.model_validate(item) for item in cached]
+
         params = {
             "action": "query",
             "list": "search",
@@ -141,15 +155,19 @@ class WikipediaClient:
             "utf8": 1,
         }
 
-        async with httpx.AsyncClient(timeout=self.timeout, headers=self.headers) as client:
-            try:
-                response = await client.get(self.BASE_URL, params=params)
-                response.raise_for_status()
-                data = response.json()
-            except httpx.HTTPError as exc:
-                raise WikipediaClientError(f"Wikipedia search request failed: {exc}") from exc
-            except Exception as exc:
-                raise WikipediaClientError(f"Unexpected error during Wikipedia search: {exc}") from exc
+        try:
+            response = await self.client.get(
+                self.BASE_URL,
+                params=params,
+                headers=self.headers,
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            data = response.json()
+        except httpx.HTTPError as exc:
+            raise WikipediaClientError(f"Wikipedia search request failed: {exc}") from exc
+        except Exception as exc:
+            raise WikipediaClientError(f"Unexpected error during Wikipedia search: {exc}") from exc
 
         query_data = data.get("query", {})
         search_results = query_data.get("search", [])
@@ -161,10 +179,7 @@ class WikipediaClient:
             snippet = item.get("snippet", "")
             word_count = item.get("wordcount")
 
-            # Clean HTML tags like <span class="searchmatch"> from snippet
             clean_snippet = snippet.replace('<span class="searchmatch">', "").replace("</span>", "")
-
-            # Build canonical URL
             encoded_title = urllib.parse.quote(title.replace(" ", "_"))
             url = f"https://en.wikipedia.org/wiki/{encoded_title}"
 
@@ -177,6 +192,14 @@ class WikipediaClient:
                     word_count=word_count,
                 )
             )
+
+        # Store in cache
+        await self.cache.set(
+            cache_key,
+            [c.model_dump() for c in candidates],
+            ttl_seconds=float(settings.CACHE_WIKI_METADATA_TTL_SECONDS),
+        )
+        return candidates
 
         return candidates
 
@@ -204,15 +227,19 @@ class WikipediaClient:
         else:
             params["titles"] = title_or_pageid
 
-        async with httpx.AsyncClient(timeout=self.timeout, headers=self.headers) as client:
-            try:
-                response = await client.get(self.BASE_URL, params=params)
-                response.raise_for_status()
-                data = response.json()
-            except httpx.HTTPError as exc:
-                raise WikipediaClientError(f"Wikipedia page fetch request failed: {exc}") from exc
-            except Exception as exc:
-                raise WikipediaClientError(f"Unexpected error during Wikipedia page fetch: {exc}") from exc
+        try:
+            response = await self.client.get(
+                self.BASE_URL,
+                params=params,
+                headers=self.headers,
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            data = response.json()
+        except httpx.HTTPError as exc:
+            raise WikipediaClientError(f"Wikipedia page fetch request failed: {exc}") from exc
+        except Exception as exc:
+            raise WikipediaClientError(f"Unexpected error during Wikipedia page fetch: {exc}") from exc
 
         query_data = data.get("query", {})
         pages = query_data.get("pages", {})
@@ -257,15 +284,19 @@ class WikipediaClient:
                     "prop": "text",
                     "format": "json",
                 }
-                async with httpx.AsyncClient(timeout=self.timeout, headers=self.headers) as parse_client:
-                    p_res = await parse_client.get(self.BASE_URL, params=parse_params)
-                    if p_res.status_code == 200:
-                        html_text = p_res.json().get("parse", {}).get("text", {}).get("*", "")
-                        if html_text:
-                            table_text, table_links = WikiTableParser.format_tables_as_paragraphs(html_text)
-                            if table_text:
-                                page_info["extract"] = raw_extract + "\n\n== Tabular Details ==\n\n" + table_text
-                                page_info["extracted_links"] = table_links
+                p_res = await self.client.get(
+                    self.BASE_URL,
+                    params=parse_params,
+                    headers=self.headers,
+                    timeout=self.timeout,
+                )
+                if p_res.status_code == 200:
+                    html_text = p_res.json().get("parse", {}).get("text", {}).get("*", "")
+                    if html_text:
+                        table_text, table_links = WikiTableParser.format_tables_as_paragraphs(html_text)
+                        if table_text:
+                            page_info["extract"] = raw_extract + "\n\n== Tabular Details ==\n\n" + table_text
+                            page_info["extracted_links"] = table_links
             except Exception:
                 pass  # Fall back to base extract if HTML parsing encounters error
 

@@ -4,6 +4,7 @@ import logging
 import re
 import time
 from typing import Any, AsyncGenerator, Dict, List, Optional, Set, Tuple
+from uuid import UUID, uuid4
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -36,7 +37,13 @@ from app.services.citation_manager import (
     PrimaryArticleSelector,
     format_answer_with_primary_reference,
 )
-from app.services.response_controller import ResponseController
+from app.services.response_controller import (
+    InferenceQueueFullError,
+    InferenceQueueTimeoutError,
+    Priority,
+    RequestCancelledError,
+    ResponseController,
+)
 from app.services.streaming_engine import StreamingEngine
 from app.services.title_generator import ConversationTitleGenerator
 
@@ -209,6 +216,7 @@ class AnswerOrchestrator:
         conversation_manager: Optional[ConversationManager] = None,
         context_manager: Optional[ContextManager] = None,
         title_generator: Optional[ConversationTitleGenerator] = None,
+        response_controller: Optional[ResponseController] = None,
     ):
         self.evidence_reasoner = evidence_reasoner or EvidenceReasoner()
         self.document_cache = document_cache or DocumentCacheService()
@@ -217,41 +225,33 @@ class AnswerOrchestrator:
         self.passage_retriever = passage_retriever or PassageRetriever()
         self.conversation_manager = conversation_manager or ConversationManager()
         self.context_manager = context_manager or ContextManager()
+        self.response_controller = response_controller or ResponseController.get_instance()
         self.title_generator = title_generator or ConversationTitleGenerator(llm_adapter=self.llm_adapter)
         self.llm_orchestrator = LLMOrchestrator(
             conversation_manager=self.conversation_manager,
             context_manager=self.context_manager,
             llm_adapter=self.llm_adapter,
+            response_controller=self.response_controller,
             title_generator=self.title_generator,
         )
 
-    async def answer(self, request: AnswerRequest) -> AnswerResponse:
+    async def answer(self, request: AnswerRequest, request_id: Optional[str] = None) -> AnswerResponse:
         """Process a user question through the complete pipeline to generate a grounded answer."""
         t_req_start = time.perf_counter()
+        req_id = request_id or str(uuid4())
         question = request.question.strip()
         logger.info(">>> [Stage 7] Starting pipeline for question: '%s'", question)
 
-        # Detect listing/enumeration queries up-front so we can widen limits early
+        # Detect listing/enumeration queries up-front for prompt tuning
         _is_list_query = NLPQueryParser.is_list_question(question)
         if _is_list_query:
-            logger.info("[Stage 7] List/enumeration query detected — widening passage limits")
-            # Override request limits: more passages, higher top_k
-            request = request.model_copy(update={
-                "max_evidence_passages": min(request.max_evidence_passages * 2, 8),
-                "top_k_per_document": min(request.top_k_per_document + 2, 10),
-            })
+            logger.info("[Stage 7] List/enumeration query detected")
 
         # Adaptive complexity detection
         complexity_res = AdaptiveQueryAnalyzer.analyze_complexity(question)
         logger.info("[Stage 7] Adaptive complexity: %s (clauses=%d, requests=%d, reasons=%s)",
                     complexity_res.complexity.value, complexity_res.clause_count,
                     complexity_res.interrogative_count, complexity_res.reasons)
-
-        if settings.ADAPTIVE_RETRIEVAL_ENABLED and complexity_res.complexity in (QueryComplexity.MEDIUM, QueryComplexity.COMPLEX):
-            request = request.model_copy(update={
-                "max_evidence_passages": max(request.max_evidence_passages, 6),
-                "top_k_per_document": max(request.top_k_per_document, 6),
-            })
 
         diagnostics = RetrievalDiagnostics(
             embedding_model=settings.EMBEDDING_MODEL,
@@ -663,13 +663,20 @@ class AnswerOrchestrator:
         resp_tokens = None
 
         try:
-            # For list queries boost num_predict to 512 (ample for 50+ list items, fast on CPU)
-            if _is_list_query:
-                llm_result = await self.llm_adapter.generate_answer(
-                    prompt_ctx, num_predict_override=512
-                )
-            else:
-                llm_result = await self.llm_adapter.generate_answer(prompt_ctx)
+            async def _invoke_llm():
+                # For list queries boost num_predict to 512 (ample for 50+ list items, fast on CPU)
+                if _is_list_query:
+                    return await self.llm_adapter.generate_answer(
+                        prompt_ctx, num_predict_override=512
+                    )
+                else:
+                    return await self.llm_adapter.generate_answer(prompt_ctx)
+
+            llm_result = await self.response_controller.execute_bounded(
+                request_id=req_id,
+                coro_func=_invoke_llm,
+                priority=Priority.INTERACTIVE,
+            )
             answer_text = llm_result.answer_text
             # 1. Clean introductory meta list headings e.g.:
             # "Here is a complete list of the Presidents of India, as documented in the provided evidence:" -> "Presidents of India:"
@@ -894,10 +901,7 @@ class AnswerOrchestrator:
         # Detect listing query
         _is_list_query = NLPQueryParser.is_list_question(question)
         if _is_list_query:
-            request = request.model_copy(update={
-                "max_evidence_passages": min(request.max_evidence_passages * 2, 8),
-                "top_k_per_document": min(request.top_k_per_document + 2, 10),
-            })
+            logger.info("[Stage 7 Stream] List/enumeration query detected")
 
         # Run non-LLM upstream retrieval by calling answer() with a fast stub or running stages
         # To ensure exact parity, we use the evidence gathering from answer()
@@ -986,10 +990,18 @@ class AnswerOrchestrator:
                 selected_chunks = EvidencePacker.pack_slotted_evidence(
                     subqueries=complexity_res.subqueries,
                     candidate_chunks=retrieved_chunks,
-                    max_total_passages=request.max_evidence_passages,
+                    max_passages=request.max_evidence_passages,
+                    primary_entities=complexity_res.primary_entities,
+                    question=question,
                 )
             else:
-                selected_chunks = retrieved_chunks[: request.max_evidence_passages]
+                selected_chunks = EvidencePacker.pack_slotted_evidence(
+                    subqueries=[],
+                    candidate_chunks=retrieved_chunks,
+                    max_passages=request.max_evidence_passages,
+                    primary_entities=complexity_res.primary_entities,
+                    question=question,
+                )
 
             for c in selected_chunks:
                 evidence_passages.append({

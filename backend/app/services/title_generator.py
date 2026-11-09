@@ -8,7 +8,7 @@ import asyncio
 import logging
 import re
 from typing import Optional, Set
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from app.core.config import settings
 from app.services.citation_manager import strip_inline_citations
@@ -174,12 +174,24 @@ class ConversationTitleGenerator:
         )
 
         try:
-            raw_title = await self.llm_adapter.generate_text(
-                prompt=prompt,
-                system_prompt=TITLE_SYSTEM_PROMPT,
-                num_predict=24,
-                temperature=0.3,
-                timeout=12.0,
+            from app.services.response_controller import Priority, ResponseController
+            resp_ctrl = ResponseController.get_instance()
+            title_req_id = f"title_{uuid4()}"
+
+            async def _run():
+                return await self.llm_adapter.generate_text(
+                    prompt=prompt,
+                    system_prompt=TITLE_SYSTEM_PROMPT,
+                    num_predict=24,
+                    temperature=0.3,
+                    timeout=12.0,
+                )
+
+            raw_title = await resp_ctrl.execute_bounded(
+                request_id=title_req_id,
+                coro_func=_run,
+                priority=Priority.BACKGROUND,
+                timeout=15.0,
             )
             title = self.clean_and_validate_title(raw_title, clean_q)
             logger.info("Generated title for question '%s': '%s'", clean_q[:40], title)

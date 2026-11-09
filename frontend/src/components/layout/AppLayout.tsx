@@ -9,7 +9,9 @@ interface AppLayoutProps {
 }
 
 export const AppLayout: React.FC<AppLayoutProps> = ({ children, onNewChat }) => {
-  const { isSidebarOpen, toggleSidebar, setSidebarOpen } = useChatStore()
+  const isSidebarOpen = useChatStore((s) => s.isSidebarOpen)
+  const toggleSidebar = useChatStore((s) => s.toggleSidebar)
+  const setSidebarOpen = useChatStore((s) => s.setSidebarOpen)
 
   // Handle responsive initial sidebar state and window resize
   useEffect(() => {

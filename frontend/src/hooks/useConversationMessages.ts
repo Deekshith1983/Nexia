@@ -7,12 +7,13 @@ export const messagesQueryKey = (conversationId: string | null) => ["messages", 
 export function useConversationMessages(conversationId: string | null) {
   const query = useQuery<ChatMessage[]>({
     queryKey: messagesQueryKey(conversationId),
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       if (!conversationId) return []
-      return ConversationService.getMessages(conversationId, 100)
+      return ConversationService.getMessages(conversationId, 100, signal)
     },
     enabled: !!conversationId,
-    staleTime: 1000 * 60, // 1 minute
+    staleTime: 60_000,   // 1 minute fresh
+    gcTime: 300_000,     // 5 minutes in cache
   })
 
   return {
@@ -23,4 +24,3 @@ export function useConversationMessages(conversationId: string | null) {
     refetch: query.refetch,
   }
 }
-

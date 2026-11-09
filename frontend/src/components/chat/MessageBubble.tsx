@@ -1,7 +1,8 @@
-import React from "react"
+import React, { memo } from "react"
 import { Sparkles, User, AlertCircle } from "lucide-react"
 import { MarkdownRenderer } from "../messages/MarkdownRenderer"
 import { MessageActions } from "../messages/MessageActions"
+import { ErrorBoundary } from "../ui/ErrorBoundary"
 import type { ChatMessage } from "../../types/message"
 
 interface MessageBubbleProps {
@@ -10,7 +11,7 @@ interface MessageBubbleProps {
   onRetry?: () => void
 }
 
-export const MessageBubble: React.FC<MessageBubbleProps> = ({
+const MessageBubbleComponent: React.FC<MessageBubbleProps> = ({
   message,
   isStreaming = false,
   onRetry,
@@ -88,3 +89,21 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
   )
 }
 
+export const MessageBubble = memo(
+  (props: MessageBubbleProps) => (
+    <ErrorBoundary fallbackTitle="Failed to render message">
+      <MessageBubbleComponent {...props} />
+    </ErrorBoundary>
+  ),
+  (prev, next) => {
+    return (
+      prev.message.id === next.message.id &&
+      prev.message.content === next.message.content &&
+      prev.message.message_status === next.message.message_status &&
+      prev.isStreaming === next.isStreaming &&
+      prev.onRetry === next.onRetry
+    )
+  }
+)
+
+MessageBubble.displayName = "MessageBubble"

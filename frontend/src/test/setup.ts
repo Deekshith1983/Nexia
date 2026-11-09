@@ -18,3 +18,12 @@ Object.defineProperty(window, 'matchMedia', {
 // Mock scrollIntoView
 Element.prototype.scrollIntoView = () => {}
 
+// Mock ResizeObserver
+class MockResizeObserver {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+
+global.ResizeObserver = MockResizeObserver as any
+window.ResizeObserver = MockResizeObserver as any

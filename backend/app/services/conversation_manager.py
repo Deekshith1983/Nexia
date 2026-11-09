@@ -7,8 +7,10 @@ from uuid import UUID, uuid4
 from sqlalchemy import desc, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.db.connection import get_session_factory
 from app.db.models import NexiaConversation, NexiaConversationMessage
+from app.services.cache_service import CacheService
 from app.schemas.conversation import (
     ChatMessage,
     ConversationCreate,
@@ -62,6 +64,7 @@ class ConversationManager:
             u_at = datetime.now(timezone.utc)
 
         logger.info("Created conversation %s: '%s'", conv.id, conv.title)
+        await CacheService.get_instance().invalidate_prefix("conv_list:")
         return ConversationRead(
             id=conv.id,
             title=conv.title,
@@ -111,7 +114,13 @@ class ConversationManager:
         status: Optional[ConversationStatus] = None,
         session: Optional[AsyncSession] = None,
     ) -> List[ConversationRead]:
-        """List conversations ordered by updated_at desc."""
+        """List conversations ordered by updated_at desc with batch count query and caching."""
+        cache = CacheService.get_instance()
+        cache_key = f"conv_list:{limit}:{offset}:{status.value if status else 'all'}"
+        cached = await cache.get(cache_key)
+        if cached is not None and isinstance(cached, list):
+            return [ConversationRead.model_validate(c) for c in cached]
+
         async def _query(s: AsyncSession):
             stmt = select(NexiaConversation)
             if status:
@@ -119,12 +128,23 @@ class ConversationManager:
             stmt = stmt.order_by(desc(NexiaConversation.updated_at)).limit(limit).offset(offset)
             res = await s.execute(stmt)
             conversations = res.scalars().all()
+            if not conversations:
+                return []
+
+            conv_ids = [c.id for c in conversations]
+            counts_stmt = (
+                select(
+                    NexiaConversationMessage.conversation_id,
+                    func.count().label("cnt"),
+                )
+                .where(NexiaConversationMessage.conversation_id.in_(conv_ids))
+                .group_by(NexiaConversationMessage.conversation_id)
+            )
+            counts_res = await s.execute(counts_stmt)
+            counts_map = {row[0]: row[1] for row in counts_res.all()}
+
             results = []
             for c in conversations:
-                count_stmt = select(func.count()).select_from(NexiaConversationMessage).where(
-                    NexiaConversationMessage.conversation_id == c.id
-                )
-                count_res = await s.execute(count_stmt)
                 results.append(
                     ConversationRead(
                         id=c.id,
@@ -133,15 +153,23 @@ class ConversationManager:
                         metadata=c.metadata_json,
                         created_at=c.created_at,
                         updated_at=c.updated_at,
-                        message_count=count_res.scalar() or 0,
+                        message_count=counts_map.get(c.id, 0),
                     )
                 )
             return results
 
         if session:
-            return await _query(session)
-        async with self.session_factory() as s:
-            return await _query(s)
+            res_list = await _query(session)
+        else:
+            async with self.session_factory() as s:
+                res_list = await _query(s)
+
+        await cache.set(
+            cache_key,
+            [r.model_dump() for r in res_list],
+            ttl_seconds=float(settings.CACHE_CONVERSATIONS_TTL_SECONDS),
+        )
+        return res_list
 
     async def update_conversation(
         self,
@@ -171,9 +199,13 @@ class ConversationManager:
             return await self.get_conversation(conversation_id, session=s)
 
         if session:
-            return await _update(session)
-        async with self.session_factory() as s:
-            return await _update(s)
+            res = await _update(session)
+        else:
+            async with self.session_factory() as s:
+                res = await _update(s)
+        if res:
+            await CacheService.get_instance().invalidate_prefix("conv_list:")
+        return res
 
     async def delete_conversation(
         self,
@@ -192,9 +224,13 @@ class ConversationManager:
             return True
 
         if session:
-            return await _del(session)
-        async with self.session_factory() as s:
-            return await _del(s)
+            ok = await _del(session)
+        else:
+            async with self.session_factory() as s:
+                ok = await _del(s)
+        if ok:
+            await CacheService.get_instance().invalidate_prefix("conv_list:")
+        return ok
 
     async def add_message(
         self,
@@ -249,6 +285,8 @@ class ConversationManager:
         else:
             async with self.session_factory() as s:
                 await _add(s)
+
+        await CacheService.get_instance().invalidate_prefix("conv_list:")
 
         m_at = getattr(msg, "created_at", None)
         if not isinstance(m_at, datetime):
@@ -386,6 +424,10 @@ class ConversationManager:
             return res.rowcount > 0
 
         if session:
-            return await _update(session)
-        async with self.session_factory() as s:
-            return await _update(s)
+            ok = await _update(session)
+        else:
+            async with self.session_factory() as s:
+                ok = await _update(s)
+        if ok:
+            await CacheService.get_instance().invalidate_prefix("conv_list:")
+        return ok

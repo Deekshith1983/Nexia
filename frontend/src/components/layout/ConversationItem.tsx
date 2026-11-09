@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from "react"
+import React, { useState, useRef, useEffect, memo } from "react"
 import { MessageSquare, MoreHorizontal, Edit2, Trash2, Check, X } from "lucide-react"
 import type { ConversationRead } from "../../types/conversation"
 
@@ -10,7 +10,7 @@ interface ConversationItemProps {
   onDelete: () => void
 }
 
-export const ConversationItem: React.FC<ConversationItemProps> = ({
+const ConversationItemComponent: React.FC<ConversationItemProps> = ({
   conversation,
   isActive,
   onSelect,
@@ -67,11 +67,10 @@ export const ConversationItem: React.FC<ConversationItemProps> = ({
 
   return (
     <div
-      className={`group relative flex items-center justify-between w-full px-3 py-2 rounded-xl text-sm transition-colors cursor-pointer select-none ${
-        isActive
+      className={`group relative flex items-center justify-between w-full px-3 py-2 rounded-xl text-sm transition-colors cursor-pointer select-none ${isActive
           ? "bg-sidebar-active text-foreground font-medium shadow-xs"
           : "text-sidebar-foreground hover:bg-sidebar-hover hover:text-foreground"
-      }`}
+        }`}
       onClick={() => {
         if (!isEditing) onSelect()
       }}
@@ -118,9 +117,8 @@ export const ConversationItem: React.FC<ConversationItemProps> = ({
         <div className="relative" ref={menuRef} onClick={(e) => e.stopPropagation()}>
           <button
             onClick={() => setMenuOpen(!menuOpen)}
-            className={`p-1 rounded-md text-muted-foreground hover:text-foreground transition-opacity ${
-              isActive || menuOpen ? "opacity-100" : "opacity-0 group-hover:opacity-100"
-            }`}
+            className={`p-1 rounded-md text-muted-foreground hover:text-foreground transition-opacity ${isActive || menuOpen ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+              }`}
             title="Conversation options"
           >
             <MoreHorizontal className="w-3.5 h-3.5" />
@@ -156,3 +154,19 @@ export const ConversationItem: React.FC<ConversationItemProps> = ({
   )
 }
 
+export const ConversationItem = memo(
+  ConversationItemComponent,
+  (prev, next) => {
+    return (
+      prev.conversation.id === next.conversation.id &&
+      prev.conversation.title === next.conversation.title &&
+      prev.conversation.updated_at === next.conversation.updated_at &&
+      prev.isActive === next.isActive &&
+      prev.onSelect === next.onSelect &&
+      prev.onRename === next.onRename &&
+      prev.onDelete === next.onDelete
+    )
+  }
+)
+
+ConversationItem.displayName = "ConversationItem"

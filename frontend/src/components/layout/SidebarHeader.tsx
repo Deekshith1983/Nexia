@@ -8,7 +8,9 @@ interface SidebarHeaderProps {
 }
 
 export const SidebarHeader: React.FC<SidebarHeaderProps> = ({ onNewChat, onCloseMobile }) => {
-  const { toggleSidebar, theme, toggleTheme } = useChatStore()
+  const toggleSidebar = useChatStore((s) => s.toggleSidebar)
+  const theme = useChatStore((s) => s.theme)
+  const toggleTheme = useChatStore((s) => s.toggleTheme)
 
   return (
     <div className="flex flex-col gap-3 p-3 border-b border-sidebar-border">

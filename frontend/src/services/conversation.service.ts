@@ -38,8 +38,15 @@ export const ConversationService = {
     })
   },
 
-  async getMessages(conversationId: string, limit: number = 50): Promise<ChatMessage[]> {
-    return request<ChatMessage[]>(`${API_V1}/conversations/${conversationId}/messages?limit=${limit}`)
+  async getMessages(
+    conversationId: string,
+    limit: number = 50,
+    signal?: AbortSignal
+  ): Promise<ChatMessage[]> {
+    return request<ChatMessage[]>(
+      `${API_V1}/conversations/${conversationId}/messages?limit=${limit}`,
+      { signal }
+    )
   },
 }
 

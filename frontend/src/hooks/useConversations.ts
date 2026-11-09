@@ -8,12 +8,14 @@ export const CONVERSATIONS_QUERY_KEY = ["conversations"]
 
 export function useConversations() {
   const queryClient = useQueryClient()
-  const { activeConversationId, setActiveConversationId } = useChatStore()
+  const activeConversationId = useChatStore((s) => s.activeConversationId)
+  const setActiveConversationId = useChatStore((s) => s.setActiveConversationId)
 
   const conversationsQuery = useQuery({
     queryKey: CONVERSATIONS_QUERY_KEY,
     queryFn: () => ConversationService.listConversations(),
-    staleTime: 0,
+    staleTime: 30_000, // 30 seconds fresh
+    gcTime: 300_000,    // 5 minutes garbage collection
   })
 
   // Defensive deduplication by unique conversation ID and ordering by updated_at desc
@@ -33,26 +35,71 @@ export function useConversations() {
   const createMutation = useMutation({
     mutationFn: (data?: ConversationCreate) => ConversationService.createConversation(data),
     onSuccess: (newConv) => {
+      queryClient.setQueryData<ConversationRead[]>(CONVERSATIONS_QUERY_KEY, (prev = []) => {
+        return [newConv, ...prev.filter((c) => c.id !== newConv.id)]
+      })
       queryClient.invalidateQueries({ queryKey: CONVERSATIONS_QUERY_KEY })
       setActiveConversationId(newConv.id)
     },
   })
 
+  // Optimistic Rename Mutation with rollback
   const updateMutation = useMutation({
     mutationFn: ({ id, data }: { id: string; data: ConversationUpdate }) =>
       ConversationService.updateConversation(id, data),
-    onSuccess: () => {
+    onMutate: async ({ id, data }) => {
+      await queryClient.cancelQueries({ queryKey: CONVERSATIONS_QUERY_KEY })
+      const previousConversations = queryClient.getQueryData<ConversationRead[]>(CONVERSATIONS_QUERY_KEY)
+
+      if (previousConversations) {
+        queryClient.setQueryData<ConversationRead[]>(
+          CONVERSATIONS_QUERY_KEY,
+          previousConversations.map((conv) =>
+            conv.id === id ? { ...conv, ...data, updated_at: new Date().toISOString() } : conv
+          )
+        )
+      }
+
+      return { previousConversations }
+    },
+    onError: (_err, _variables, context) => {
+      if (context?.previousConversations) {
+        queryClient.setQueryData(CONVERSATIONS_QUERY_KEY, context.previousConversations)
+      }
+    },
+    onSettled: () => {
       queryClient.invalidateQueries({ queryKey: CONVERSATIONS_QUERY_KEY })
     },
   })
 
+  // Optimistic Delete Mutation with rollback
   const deleteMutation = useMutation({
     mutationFn: (id: string) => ConversationService.deleteConversation(id),
+    onMutate: async (deletedId) => {
+      await queryClient.cancelQueries({ queryKey: CONVERSATIONS_QUERY_KEY })
+      const previousConversations = queryClient.getQueryData<ConversationRead[]>(CONVERSATIONS_QUERY_KEY)
+
+      if (previousConversations) {
+        queryClient.setQueryData<ConversationRead[]>(
+          CONVERSATIONS_QUERY_KEY,
+          previousConversations.filter((conv) => conv.id !== deletedId)
+        )
+      }
+
+      return { previousConversations }
+    },
+    onError: (_err, _deletedId, context) => {
+      if (context?.previousConversations) {
+        queryClient.setQueryData(CONVERSATIONS_QUERY_KEY, context.previousConversations)
+      }
+    },
     onSuccess: (_, deletedId) => {
-      queryClient.invalidateQueries({ queryKey: CONVERSATIONS_QUERY_KEY })
       if (activeConversationId === deletedId) {
         setActiveConversationId(null)
       }
+    },
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: CONVERSATIONS_QUERY_KEY })
     },
   })
 

@@ -18,6 +18,7 @@ interface ChatState {
   streamingStage: string | null
   startGeneration: (requestId: string, conversationId: string) => void
   appendStreamToken: (token: string) => void
+  appendStreamBatch: (batch: string) => void
   setStreamingAnswer: (answer: string) => void
   setStreamStage: (stage: string | null) => void
   stopGeneration: () => void
@@ -66,6 +67,11 @@ export const useChatStore = create<ChatState>((set) => ({
   appendStreamToken: (token) =>
     set((state) => ({
       streamingAnswer: state.streamingAnswer + token,
+    })),
+
+  appendStreamBatch: (batch) =>
+    set((state) => ({
+      streamingAnswer: state.streamingAnswer + batch,
     })),
 
   setStreamingAnswer: (answer) => set({ streamingAnswer: answer }),

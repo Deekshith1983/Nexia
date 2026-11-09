@@ -1,30 +1,39 @@
-import React, { useState } from "react"
+import React, { useState, useCallback } from "react"
 import { useConversations } from "../../hooks/useConversations"
 import { useChatStore } from "../../stores/chat.store"
 import { ConversationItem } from "./ConversationItem"
 import { ConfirmModal } from "../ui/ConfirmModal"
+import { SidebarSkeleton } from "./SidebarSkeleton"
 import type { ConversationRead } from "../../types/conversation"
 
 export const ConversationList: React.FC = () => {
   const { conversations, isLoading, updateConversation, deleteConversation } = useConversations()
-  const { activeConversationId, setActiveConversationId, isGenerating } = useChatStore()
+  const activeConversationId = useChatStore((s) => s.activeConversationId)
+  const setActiveConversationId = useChatStore((s) => s.setActiveConversationId)
+  const isGenerating = useChatStore((s) => s.isGenerating)
 
   const [conversationToDelete, setConversationToDelete] = useState<ConversationRead | null>(null)
 
-  const handleSelect = (id: string) => {
-    if (isGenerating) return
-    setActiveConversationId(id)
-  }
+  const handleSelect = useCallback(
+    (id: string) => {
+      if (isGenerating) return
+      setActiveConversationId(id)
+    },
+    [isGenerating, setActiveConversationId]
+  )
 
-  const handleRename = async (id: string, newTitle: string) => {
-    try {
-      await updateConversation({ id, data: { title: newTitle } })
-    } catch (err) {
-      console.error("Rename failed:", err)
-    }
-  }
+  const handleRename = useCallback(
+    async (id: string, newTitle: string) => {
+      try {
+        await updateConversation({ id, data: { title: newTitle } })
+      } catch (err) {
+        console.error("Rename failed:", err)
+      }
+    },
+    [updateConversation]
+  )
 
-  const handleConfirmDelete = async () => {
+  const handleConfirmDelete = useCallback(async () => {
     if (conversationToDelete) {
       try {
         await deleteConversation(conversationToDelete.id)
@@ -34,21 +43,19 @@ export const ConversationList: React.FC = () => {
         setConversationToDelete(null)
       }
     }
-  }
+  }, [conversationToDelete, deleteConversation])
+
+  const handleDeleteTrigger = useCallback((conv: ConversationRead) => {
+    setConversationToDelete(conv)
+  }, [])
 
   if (isLoading) {
-    return (
-      <div className="flex flex-col gap-2 p-3">
-        {[1, 2, 3, 4, 5].map((i) => (
-          <div key={i} className="h-9 w-full bg-sidebar-hover/40 rounded-xl animate-pulse" />
-        ))}
-      </div>
-    )
+    return <SidebarSkeleton />
   }
 
   if (!conversations || conversations.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center p-6 text-center text-muted-foreground">
+      <div className="flex flex-col items-center justify-center p-6 text-center text-muted-foreground animate-in fade-in duration-200">
         <p className="text-xs">No conversations yet.</p>
         <p className="text-[11px] mt-1 text-muted-foreground/70">
           Start a new chat to explore knowledge.
@@ -70,7 +77,7 @@ export const ConversationList: React.FC = () => {
             isActive={activeConversationId === conv.id}
             onSelect={() => handleSelect(conv.id)}
             onRename={(newTitle) => handleRename(conv.id, newTitle)}
-            onDelete={() => setConversationToDelete(conv)}
+            onDelete={() => handleDeleteTrigger(conv)}
           />
         ))}
       </div>
@@ -87,4 +94,3 @@ export const ConversationList: React.FC = () => {
     </>
   )
 }
-

@@ -1,4 +1,4 @@
-import React, { useState } from "react"
+import React, { useState, useEffect, useRef, memo } from "react"
 import { Check, Copy } from "lucide-react"
 
 interface CodeBlockProps {
@@ -6,14 +6,24 @@ interface CodeBlockProps {
   value: string
 }
 
-export const CodeBlock: React.FC<CodeBlockProps> = ({ language, value }) => {
+export const CodeBlock: React.FC<CodeBlockProps> = memo(({ language, value }) => {
   const [copied, setCopied] = useState(false)
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => {
+    return () => {
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current)
+      }
+    }
+  }, [])
 
   const handleCopy = async () => {
     try {
       await navigator.clipboard.writeText(value)
       setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
+      if (timeoutRef.current) clearTimeout(timeoutRef.current)
+      timeoutRef.current = setTimeout(() => setCopied(false), 2000)
     } catch (err) {
       console.error("Failed to copy code:", err)
     }
@@ -47,5 +57,6 @@ export const CodeBlock: React.FC<CodeBlockProps> = ({ language, value }) => {
       </div>
     </div>
   )
-}
+})
 
+CodeBlock.displayName = "CodeBlock"

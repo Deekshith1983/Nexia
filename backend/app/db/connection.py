@@ -31,8 +31,10 @@ def get_engine() -> AsyncEngine:
             settings.DATABASE_URL,
             pool_size=settings.DB_POOL_SIZE,
             max_overflow=settings.DB_MAX_OVERFLOW,
+            pool_recycle=settings.DB_POOL_RECYCLE,
+            pool_timeout=settings.DB_POOL_TIMEOUT,
+            pool_pre_ping=settings.DB_PRE_PING,
             connect_args={"timeout": settings.DB_CONNECT_TIMEOUT},
-            pool_pre_ping=True,
             echo=False,
         )
         _session_factory = async_sessionmaker(
@@ -43,6 +45,20 @@ def get_engine() -> AsyncEngine:
         )
         _engine_loop = current_loop
     return _engine
+
+
+async def dispose_engine() -> None:
+    """Dispose the database connection pool cleanly on shutdown."""
+    global _engine, _session_factory, _engine_loop
+    if _engine is not None:
+        try:
+            await _engine.dispose()
+        except Exception:
+            pass
+        finally:
+            _engine = None
+            _session_factory = None
+            _engine_loop = None
 
 
 def get_session_factory() -> async_sessionmaker[AsyncSession]:

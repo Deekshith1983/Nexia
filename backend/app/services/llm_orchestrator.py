@@ -22,7 +22,13 @@ from app.services.llm_adapter import OllamaLLMAdapter
 from app.services.memory_manager import MemoryManager
 from app.services.observability import ObservabilityManager
 from app.services.prompts import PromptContext, build_answer_prompt
-from app.services.response_controller import RequestCancelledError, ResponseController
+from app.services.response_controller import (
+    InferenceQueueFullError,
+    InferenceQueueTimeoutError,
+    Priority,
+    RequestCancelledError,
+    ResponseController,
+)
 from app.services.streaming_engine import StreamingEngine
 from app.services.title_generator import ConversationTitleGenerator
 from app.services.citation_manager import (
@@ -264,6 +270,17 @@ class LLMOrchestrator:
             message=f"Starting generation with {settings.LLM_MODEL}...",
         )
 
+        current_task = asyncio.current_task()
+        if current_task:
+            self.resp_ctrl.register_task(req_id, current_task)
+
+        # Acquire admission slot through centralized inference manager
+        try:
+            await self.resp_ctrl.acquire_slot(req_id, priority=Priority.INTERACTIVE)
+        except (InferenceQueueFullError, InferenceQueueTimeoutError, RequestCancelledError) as exc:
+            yield StreamingEngine.emit_error(req_id, "QUEUE_ERROR", str(exc))
+            return
+
         # 4. Stream tokens progressively
         raw_tokens: List[str] = []
         final_gen_result = None
@@ -292,6 +309,8 @@ class LLMOrchestrator:
             logger.error("Streaming generation failure: %s", e)
             yield StreamingEngine.emit_error(req_id, "LLM_STREAM_ERROR", str(e))
             return
+        finally:
+            await self.resp_ctrl.release_slot(req_id)
 
         full_raw_text = "".join(raw_tokens).strip()
 

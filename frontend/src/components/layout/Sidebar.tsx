@@ -8,7 +8,8 @@ interface SidebarProps {
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({ onNewChat }) => {
-  const { isSidebarOpen, setSidebarOpen } = useChatStore()
+  const isSidebarOpen = useChatStore((s) => s.isSidebarOpen)
+  const setSidebarOpen = useChatStore((s) => s.setSidebarOpen)
 
   const handleNewChat = () => {
     onNewChat()

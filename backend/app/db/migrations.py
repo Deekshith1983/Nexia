@@ -20,6 +20,26 @@ async def init_db() -> None:
         await conn.run_sync(Base.metadata.create_all)
 
         logger.info("Creating full-text search and vector indexes if not present...")
+        # Performance optimization B-Tree indexes for conversation sidebar and messages
+        await conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS idx_conversations_updated_at "
+                "ON nexia_conversations (updated_at DESC);"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS idx_conversations_status_updated_at "
+                "ON nexia_conversations (status, updated_at DESC);"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS idx_conv_messages_conv_created "
+                "ON nexia_conversation_messages (conversation_id, created_at ASC);"
+            )
+        )
+
         # Full text search GIN index
         await conn.execute(
             text(

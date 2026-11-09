@@ -1,3 +1,4 @@
+import { buildAnswerPayload } from "../config/retrieval.config"
 import type {
   AnswerRequest,
   SSECancelledEvent,
@@ -28,6 +29,7 @@ export async function streamAnswer(
   signal?: AbortSignal
 ): Promise<void> {
   const url = `${API_V1}/retrieval/answer/stream`
+  const payload = buildAnswerPayload(request)
 
   let response: Response
   try {
@@ -36,7 +38,7 @@ export async function streamAnswer(
       headers: {
         "Content-Type": "application/json",
       },
-      body: JSON.stringify(request),
+      body: JSON.stringify(payload),
       signal,
     })
   } catch (err: any) {

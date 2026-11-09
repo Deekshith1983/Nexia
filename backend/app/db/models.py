@@ -150,7 +150,9 @@ class NexiaConversation(Base):
 
     __table_args__ = (
         Index("idx_conversations_created_at", "created_at"),
+        Index("idx_conversations_updated_at", "updated_at"),
         Index("idx_conversations_status", "status"),
+        Index("idx_conversations_status_updated_at", "status", "updated_at"),
     )
 
 
@@ -189,6 +191,7 @@ class NexiaConversationMessage(Base):
     __table_args__ = (
         Index("idx_conv_messages_conv_id", "conversation_id"),
         Index("idx_conv_messages_created_at", "created_at"),
+        Index("idx_conv_messages_conv_created", "conversation_id", "created_at"),
     )
 
 

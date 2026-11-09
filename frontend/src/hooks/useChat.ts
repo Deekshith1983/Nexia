@@ -1,9 +1,10 @@
-import { useRef, useCallback } from "react"
+import { useRef, useCallback, useEffect } from "react"
 import { useQueryClient } from "@tanstack/react-query"
 import { useChatStore } from "../stores/chat.store"
 import { ConversationService } from "../services/conversation.service"
 import { AnswerService } from "../services/answer.service"
 import { streamAnswer } from "../services/streaming.service"
+import { buildAnswerPayload } from "../config/retrieval.config"
 import { messagesQueryKey } from "./useConversationMessages"
 import { CONVERSATIONS_QUERY_KEY } from "./useConversations"
 import type { ChatMessage } from "../types/message"
@@ -11,22 +12,46 @@ import type { ConversationRead } from "../types/conversation"
 
 export function useChat() {
   const queryClient = useQueryClient()
-  const {
-    activeConversationId,
-    setActiveConversationId,
-    isGenerating,
-    activeRequestId,
-    activeStreamingConversationId,
-    streamingAnswer,
-    streamingStage,
-    startGeneration,
-    appendStreamToken,
-    setStreamingAnswer,
-    setStreamStage,
-    stopGeneration,
-  } = useChatStore()
+
+  // Fine-grained selector subscriptions to avoid re-renders when other slices change
+  const activeConversationId = useChatStore((s) => s.activeConversationId)
+  const setActiveConversationId = useChatStore((s) => s.setActiveConversationId)
+  const isGenerating = useChatStore((s) => s.isGenerating)
+  const activeRequestId = useChatStore((s) => s.activeRequestId)
+  const activeStreamingConversationId = useChatStore((s) => s.activeStreamingConversationId)
+  const streamingAnswer = useChatStore((s) => s.streamingAnswer)
+  const streamingStage = useChatStore((s) => s.streamingStage)
+  const startGeneration = useChatStore((s) => s.startGeneration)
+  const appendStreamBatch = useChatStore((s) => s.appendStreamBatch)
+  const setStreamingAnswer = useChatStore((s) => s.setStreamingAnswer)
+  const setStreamStage = useChatStore((s) => s.setStreamStage)
+  const stopGeneration = useChatStore((s) => s.stopGeneration)
 
   const abortControllerRef = useRef<AbortController | null>(null)
+  const tokenBufferRef = useRef<string>("")
+  const rafIdRef = useRef<number | null>(null)
+
+  // Flush any accumulated tokens in buffer to Zustand store
+  const flushTokenBuffer = useCallback(() => {
+    if (tokenBufferRef.current) {
+      const batch = tokenBufferRef.current
+      tokenBufferRef.current = ""
+      appendStreamBatch(batch)
+    }
+    rafIdRef.current = null
+  }, [appendStreamBatch])
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (rafIdRef.current !== null) {
+        cancelAnimationFrame(rafIdRef.current)
+      }
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort()
+      }
+    }
+  }, [])
 
   const sendMessage = useCallback(
     async (questionText: string) => {
@@ -88,13 +113,23 @@ export function useChat() {
       abortControllerRef.current = abortCtrl
 
       let accumulatedAnswer = ""
+      tokenBufferRef.current = ""
+
+      // Schedule batch flush using requestAnimationFrame
+      const scheduleTokenFlush = () => {
+        if (rafIdRef.current === null) {
+          rafIdRef.current = requestAnimationFrame(() => {
+            flushTokenBuffer()
+          })
+        }
+      }
 
       // 4. Execute streaming request
       await streamAnswer(
-        {
+        buildAnswerPayload({
           question: trimmed,
           conversation_id: convId,
-        },
+        }),
         {
           onStart: () => {
             setStreamStage("Searching knowledge base...")
@@ -104,9 +139,17 @@ export function useChat() {
           },
           onToken: (tok) => {
             accumulatedAnswer += tok
-            appendStreamToken(tok)
+            tokenBufferRef.current += tok
+            scheduleTokenFlush()
           },
           onComplete: (complete) => {
+            // Cancel any pending RAF and flush remaining tokens immediately
+            if (rafIdRef.current !== null) {
+              cancelAnimationFrame(rafIdRef.current)
+              rafIdRef.current = null
+            }
+            tokenBufferRef.current = ""
+
             const finalAnswerText = complete.answer_text || accumulatedAnswer
             setStreamingAnswer(finalAnswerText)
 
@@ -135,6 +178,12 @@ export function useChat() {
             queryClient.invalidateQueries({ queryKey: CONVERSATIONS_QUERY_KEY })
           },
           onCancelled: () => {
+            if (rafIdRef.current !== null) {
+              cancelAnimationFrame(rafIdRef.current)
+              rafIdRef.current = null
+            }
+            tokenBufferRef.current = ""
+
             if (accumulatedAnswer) {
               const partialMsg: ChatMessage = {
                 id: crypto.randomUUID(),
@@ -153,6 +202,12 @@ export function useChat() {
             stopGeneration()
           },
           onError: (err) => {
+            if (rafIdRef.current !== null) {
+              cancelAnimationFrame(rafIdRef.current)
+              rafIdRef.current = null
+            }
+            tokenBufferRef.current = ""
+
             console.error("Streaming error:", err)
             const errorMsg: ChatMessage = {
               id: crypto.randomUUID(),
@@ -180,7 +235,7 @@ export function useChat() {
       queryClient,
       setActiveConversationId,
       startGeneration,
-      appendStreamToken,
+      flushTokenBuffer,
       setStreamingAnswer,
       setStreamStage,
       stopGeneration,
@@ -199,6 +254,11 @@ export function useChat() {
       abortControllerRef.current.abort()
       abortControllerRef.current = null
     }
+    if (rafIdRef.current !== null) {
+      cancelAnimationFrame(rafIdRef.current)
+      rafIdRef.current = null
+    }
+    tokenBufferRef.current = ""
     stopGeneration()
   }, [activeRequestId, stopGeneration])
 
@@ -211,4 +271,3 @@ export function useChat() {
     activeStreamingConversationId,
   }
 }
-

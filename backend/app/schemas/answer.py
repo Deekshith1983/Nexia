@@ -1,10 +1,15 @@
 """Pydantic schemas for Stage 7 Grounded Answer API."""
 
-from typing import List, Literal, Optional
+from typing import Any, List, Literal, Optional
 from uuid import UUID
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.schemas.evidence_package import EvidencePackage
+
+# Authoritative Stage 7 Grounded Answer Retrieval Configuration
+TOP_K_PER_DOCUMENT: int = 3
+MIN_CONFIDENCE: float = 0.4
+MAX_EVIDENCE_PASSAGES: int = 9
 
 
 class AnswerRequest(BaseModel):
@@ -14,11 +19,29 @@ class AnswerRequest(BaseModel):
     subject_entity: Optional[str] = Field(default=None, description="Optional subject entity hint")
     object_entity: Optional[str] = Field(default=None, description="Optional object entity hint")
     predicate_filter: Optional[str] = Field(default=None, description="Optional relationship predicate filter")
-    top_k_per_document: int = Field(default=4, ge=1, le=10, description="Passages per document for initial stages")
-    min_confidence: float = Field(default=0.60, ge=0.0, le=1.0, description="Minimum confidence threshold")
-    max_evidence_passages: int = Field(default=3, ge=1, le=12, description="Maximum evidence passages sent to LLM")
+    top_k_per_document: int = Field(default=TOP_K_PER_DOCUMENT, ge=1, le=10, description="Passages per document for initial stages")
+    min_confidence: float = Field(default=MIN_CONFIDENCE, ge=0.0, le=1.0, description="Minimum confidence threshold")
+    max_evidence_passages: int = Field(default=MAX_EVIDENCE_PASSAGES, ge=1, le=12, description="Maximum evidence passages sent to LLM")
     force_refresh: bool = Field(default=False, description="Bypass document cache and re-fetch from Wikipedia")
     conversation_id: Optional[UUID] = Field(default=None, description="Optional active conversation session UUID")
+
+    @model_validator(mode="before")
+    @classmethod
+    def enforce_retrieval_configuration_before(cls, data: Any) -> Any:
+        """Enforce exact canonical retrieval settings before field validation."""
+        if isinstance(data, dict):
+            data["top_k_per_document"] = TOP_K_PER_DOCUMENT
+            data["min_confidence"] = MIN_CONFIDENCE
+            data["max_evidence_passages"] = MAX_EVIDENCE_PASSAGES
+        return data
+
+    @model_validator(mode="after")
+    def enforce_retrieval_configuration(self) -> "AnswerRequest":
+        """Enforce exact canonical retrieval settings; backend is authoritative."""
+        self.top_k_per_document = TOP_K_PER_DOCUMENT
+        self.min_confidence = MIN_CONFIDENCE
+        self.max_evidence_passages = MAX_EVIDENCE_PASSAGES
+        return self
 
 
 class SourceReference(BaseModel):
@@ -37,6 +60,8 @@ class TimingBreakdown(BaseModel):
     """Fine-grained monotonic high-resolution timings in milliseconds."""
 
     total_request_ms: float = 0.0
+    queue_wait_ms: float = 0.0
+    rate_limit_check_ms: float = 0.0
     stage6_reasoning_ms: float = 0.0
     db_cache_lookup_ms: float = 0.0
     wikipedia_network_ms: float = 0.0

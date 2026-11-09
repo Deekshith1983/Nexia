@@ -7,6 +7,7 @@ import httpx
 from pydantic import BaseModel
 
 from app.core.config import settings
+from app.core.http_client import get_http_client
 from app.services.prompts import SYSTEM_PROMPT, PromptContext, build_answer_prompt
 
 logger = logging.getLogger(__name__)
@@ -51,21 +52,26 @@ class OllamaLLMAdapter:
         model: Optional[str] = None,
         timeout: Optional[float] = None,
         temperature: Optional[float] = None,
+        client: Optional[httpx.AsyncClient] = None,
     ):
         self.base_url = (base_url or settings.OLLAMA_BASE_URL).rstrip("/")
         self.model = model or settings.LLM_MODEL
         self.timeout = timeout or float(settings.LLM_TIMEOUT_SECONDS)
         self.temperature = temperature if temperature is not None else settings.LLM_TEMPERATURE
+        self._client = client
+
+    @property
+    def client(self) -> httpx.AsyncClient:
+        return self._client or get_http_client()
 
     async def check_health(self) -> bool:
         """Verify if Ollama model is available."""
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                res = await client.get(f"{self.base_url}/api/tags")
-                if res.status_code != 200:
-                    return False
-                models = res.json().get("models", [])
-                return any(self.model in m.get("name", "") for m in models)
+            res = await self.client.get(f"{self.base_url}/api/tags", timeout=5.0)
+            if res.status_code != 200:
+                return False
+            models = res.json().get("models", [])
+            return any(self.model in m.get("name", "") for m in models)
         except Exception as e:
             logger.warning("LLM health check failed: %s", e)
             return False
@@ -101,11 +107,11 @@ class OllamaLLMAdapter:
         }
 
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.post(
-                    f"{self.base_url}/api/generate",
-                    json=payload,
-                )
+            response = await self.client.post(
+                f"{self.base_url}/api/generate",
+                json=payload,
+                timeout=self.timeout,
+            )
         except httpx.TimeoutException as exc:
             raise LLMTimeoutError(f"LLM request timed out after {self.timeout}s: {exc}") from exc
         except httpx.RequestError as exc:
@@ -173,11 +179,11 @@ class OllamaLLMAdapter:
             payload["system"] = system_prompt
 
         try:
-            async with httpx.AsyncClient(timeout=call_timeout) as client:
-                response = await client.post(
-                    f"{self.base_url}/api/generate",
-                    json=payload,
-                )
+            response = await self.client.post(
+                f"{self.base_url}/api/generate",
+                json=payload,
+                timeout=call_timeout,
+            )
         except httpx.TimeoutException as exc:
             raise LLMTimeoutError(f"LLM text generation timed out after {call_timeout}s: {exc}") from exc
         except httpx.RequestError as exc:
@@ -222,32 +228,32 @@ class OllamaLLMAdapter:
         final_meta: Dict[str, Any] = {}
 
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                async with client.stream(
-                    "POST",
-                    f"{self.base_url}/api/generate",
-                    json=payload,
-                ) as response:
-                    if response.status_code != 200:
-                        err_body = await response.aread()
-                        raise LLMOutputError(f"Ollama streaming returned HTTP {response.status_code}: {err_body.decode('utf-8', errors='ignore')}")
+            async with self.client.stream(
+                "POST",
+                f"{self.base_url}/api/generate",
+                json=payload,
+                timeout=self.timeout,
+            ) as response:
+                if response.status_code != 200:
+                    err_body = await response.aread()
+                    raise LLMOutputError(f"Ollama streaming returned HTTP {response.status_code}: {err_body.decode('utf-8', errors='ignore')}")
 
-                    async for line in response.aiter_lines():
-                        if not line:
-                            continue
-                        try:
-                            chunk_data = json.loads(line)
-                        except json.JSONDecodeError:
-                            continue
+                async for line in response.aiter_lines():
+                    if not line:
+                        continue
+                    try:
+                        chunk_data = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
 
-                        token = chunk_data.get("response", "")
-                        if token:
-                            accumulated_chunks.append(token)
-                            yield ("token", token)
+                    token = chunk_data.get("response", "")
+                    if token:
+                        accumulated_chunks.append(token)
+                        yield ("token", token)
 
-                        if chunk_data.get("done", False):
-                            final_meta = chunk_data
-                            break
+                    if chunk_data.get("done", False):
+                        final_meta = chunk_data
+                        break
 
         except httpx.TimeoutException as exc:
             raise LLMTimeoutError(f"LLM streaming timed out after {self.timeout}s: {exc}") from exc
